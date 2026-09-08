@@ -11,3 +11,10 @@ def universe_path() -> Path:
     if configured:
         return Path(configured)
     return Path.cwd() / "config" / "universe.json"
+
+
+def scoring_path() -> Path:
+    configured = os.environ.get("SCORING_PATH")
+    if configured:
+        return Path(configured)
+    return Path.cwd() / "config" / "scoring.yaml"

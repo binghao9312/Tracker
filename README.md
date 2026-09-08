@@ -1,6 +1,6 @@
 # CEX Liquidity & Flow Tracker
 
-CEX-only monitoring for Binance and OKX USDT spot and perpetual markets. It measures live order-book fragility, aggressive trade flow, open interest, funding, and exchange agreement; it does not trade or predict price direction.
+CEX-only monitoring for Binance and OKX USDT spot and perpetual markets. It measures live order-book fragility, aggressive trade flow, open interest, funding, and exchange agreement. It includes local PostgreSQL-backed paper trading and replay using public normalized market data only; it never submits orders, accesses account data, or holds real positions.
 
 ## Run
 

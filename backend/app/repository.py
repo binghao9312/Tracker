@@ -9,7 +9,13 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from app.database import DerivativeMetricRow, FlowMetricRow, MarketMetricRow
+from app.database import (
+    DerivativeMetricRow,
+    FlowMetricRow,
+    MarketMetricRow,
+    PaperTradeEventRow,
+    PaperTradeRow,
+)
 
 
 class MetricRepository:
@@ -51,12 +57,191 @@ class MetricRepository:
                 "derivative": [_row_dict(row) for row in reversed(derivative.all())],
             }
 
+    async def history_range(
+        self, symbol: str, start_time: datetime, end_time: datetime
+    ) -> dict[str, list[dict[str, Any]]]:
+        async with self._sessions() as session:
+            async def rows(row_type: type[MarketMetricRow] | type[FlowMetricRow] | type[DerivativeMetricRow]) -> list[dict[str, Any]]:
+                result = await session.scalars(
+                    select(row_type)
+                    .where(
+                        row_type.symbol == symbol,
+                        row_type.timestamp >= start_time,
+                        row_type.timestamp <= end_time,
+                    )
+                    .order_by(row_type.timestamp)
+                )
+                return [_row_dict(row) for row in result.all()]
+
+            return {
+                "market": await rows(MarketMetricRow),
+                "flow": await rows(FlowMetricRow),
+                "derivative": await rows(DerivativeMetricRow),
+            }
+
     async def _append(self, row: MarketMetricRow | FlowMetricRow | DerivativeMetricRow) -> None:
         async with self._sessions.begin() as session:
             session.add(row)
 
 
-def _row_dict(row: MarketMetricRow | FlowMetricRow | DerivativeMetricRow) -> dict[str, Any]:
+
+class PaperTradeRepository:
+    """Durable local record of simulated perpetual positions and audit events."""
+
+    def __init__(self, sessions: async_sessionmaker) -> None:
+        self._sessions = sessions
+
+    async def open_trade(self, values: Mapping[str, Any]) -> dict[str, Any]:
+        async with self._sessions.begin() as session:
+            row = PaperTradeRow(**values)
+            session.add(row)
+            await session.flush()
+            return _row_dict(row)
+
+    async def close_trade(self, trade_id: int, values: Mapping[str, Any]) -> dict[str, Any]:
+        async with self._sessions.begin() as session:
+            row = await session.get(PaperTradeRow, trade_id)
+            if row is None:
+                raise KeyError(f"paper trade {trade_id} does not exist")
+            for key, value in values.items():
+                setattr(row, key, value)
+            await session.flush()
+            return _row_dict(row)
+
+    async def get_open_positions(self) -> list[dict[str, Any]]:
+        async with self._sessions() as session:
+            result = await session.scalars(
+                select(PaperTradeRow)
+                .where(PaperTradeRow.status == "OPEN")
+                .order_by(PaperTradeRow.opened_at)
+            )
+            return [_row_dict(row) for row in result.all()]
+
+    async def get_open_position(self, symbol: str) -> dict[str, Any] | None:
+        async with self._sessions() as session:
+            row = await session.scalar(
+                select(PaperTradeRow).where(
+                    PaperTradeRow.symbol == symbol, PaperTradeRow.status == "OPEN"
+                )
+            )
+            return _row_dict(row) if row is not None else None
+
+    async def list_trades(
+        self,
+        symbol: str | None = None,
+        side: str | None = None,
+        result: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        async with self._sessions() as session:
+            statement = select(PaperTradeRow).order_by(PaperTradeRow.opened_at.desc()).limit(limit)
+            if symbol:
+                statement = statement.where(PaperTradeRow.symbol == symbol.upper())
+            if side:
+                statement = statement.where(PaperTradeRow.side == side.upper())
+            if result == "open":
+                statement = statement.where(PaperTradeRow.status == "OPEN")
+            elif result == "win":
+                statement = statement.where(PaperTradeRow.status == "CLOSED", PaperTradeRow.net_pnl > 0)
+            elif result == "loss":
+                statement = statement.where(PaperTradeRow.status == "CLOSED", PaperTradeRow.net_pnl < 0)
+            rows = await session.scalars(statement)
+            return [_row_dict(row) for row in rows.all()]
+
+    async def get_trade(self, trade_id: int) -> dict[str, Any] | None:
+        async with self._sessions() as session:
+            row = await session.get(PaperTradeRow, trade_id)
+            return _row_dict(row) if row is not None else None
+
+    async def append_event(
+        self,
+        *,
+        timestamp: datetime,
+        symbol: str,
+        event_type: str,
+        reason: str | None = None,
+        trade_id: int | None = None,
+        snapshot: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        async with self._sessions.begin() as session:
+            row = PaperTradeEventRow(
+                timestamp=timestamp,
+                symbol=symbol,
+                event_type=event_type,
+                reason=reason,
+                trade_id=trade_id,
+                snapshot=dict(snapshot or {}),
+            )
+            session.add(row)
+            await session.flush()
+            return _row_dict(row)
+
+    async def stats(self) -> dict[str, Any]:
+        trades = await self.list_trades(limit=100_000)
+        closed = [trade for trade in trades if trade["status"] == "CLOSED"]
+        wins = [trade for trade in closed if (trade["net_pnl"] or 0) > 0]
+        losses = [trade for trade in closed if (trade["net_pnl"] or 0) < 0]
+        gross_profit = sum(trade["net_pnl"] for trade in wins)
+        gross_loss = abs(sum(trade["net_pnl"] for trade in losses))
+        return {
+            "total_trades": len(closed),
+            "open_trades": len(trades) - len(closed),
+            "wins": len(wins),
+            "losses": len(losses),
+            "win_rate": len(wins) / len(closed) if closed else 0.0,
+            "gross_pnl": sum(trade["gross_pnl"] or 0 for trade in closed),
+            "net_pnl": sum(trade["net_pnl"] or 0 for trade in closed),
+            "average_return": _average(closed, "return_pct"),
+            "average_win": _average(wins, "return_pct"),
+            "average_loss": _average(losses, "return_pct"),
+            "profit_factor": gross_profit / gross_loss if gross_loss else (None if not gross_profit else float("inf")),
+            "average_holding_seconds": _average(closed, "holding_seconds"),
+            "average_mfe": _average(closed, "max_favorable_excursion_pct"),
+            "average_mae": _average(closed, "max_adverse_excursion_pct"),
+            "breakdowns": {
+                "activity_score": _buckets(closed, "entry_activity_score", [(80, 84), (85, 89), (90, 94), (95, 100)]),
+                "liquidity_fragility": _buckets(closed, "entry_liquidity_fragility", [(0, 24), (25, 49), (50, 74), (75, 100)]),
+                "direction": _groups(closed, "side", ["LONG", "SHORT"]),
+                "move_type": _groups(closed, "entry_move_type", ["SPOT_DRIVEN", "LEVERAGE_DRIVEN", "MIXED"]),
+                "cross_exchange": _groups(closed, "entry_cross_exchange_state", ["CONFIRMED", "DIVERGENT", "SINGLE_EXCHANGE"]),
+            },
+        }
+
+def _average(rows: list[dict[str, Any]], key: str) -> float:
+    values = [float(row[key]) for row in rows if row.get(key) is not None]
+    return sum(values) / len(values) if values else 0.0
+
+
+def _summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    wins = [row for row in rows if (row.get("net_pnl") or 0) > 0]
+    return {
+        "trades": len(rows),
+        "win_rate": len(wins) / len(rows) if rows else 0.0,
+        "average_return": _average(rows, "return_pct"),
+        "net_pnl": sum(row.get("net_pnl") or 0 for row in rows),
+    }
+
+
+def _buckets(
+    rows: list[dict[str, Any]], key: str, ranges: list[tuple[int, int]]
+) -> dict[str, dict[str, Any]]:
+    return {
+        f"{lower}-{upper}": _summary(
+            [row for row in rows if row.get(key) is not None and lower <= row[key] <= upper]
+        )
+        for lower, upper in ranges
+    }
+
+
+def _groups(
+    rows: list[dict[str, Any]], key: str, values: list[str]
+) -> dict[str, dict[str, Any]]:
+    return {value: _summary([row for row in rows if row.get(key) == value]) for value in values}
+
+
+def _row_dict(
+    row: MarketMetricRow | FlowMetricRow | DerivativeMetricRow | PaperTradeRow | PaperTradeEventRow,
+) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for column in row.__table__.columns:
         value = getattr(row, column.name)

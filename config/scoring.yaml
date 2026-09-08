@@ -5,3 +5,16 @@ classification:
 funding:
   elevated_positive: 0.001
   elevated_negative: -0.001
+paper_trading:
+  enabled: true
+  entry_activity_score: 80
+  rearm_activity_score: 65
+  signal_persistence_seconds: 5
+  cooldown_minutes: 15
+  notional_usdt: 1000
+  max_open_positions: 5
+  take_profit_pct: 0.02
+  stop_loss_pct: 0.01
+  max_holding_minutes: 60
+  fee_bps: 5
+  require_cross_exchange_confirmation: false

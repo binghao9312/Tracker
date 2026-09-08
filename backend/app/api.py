@@ -5,16 +5,16 @@ from __future__ import annotations
 import asyncio
 from collections import defaultdict
 from collections.abc import AsyncIterator
+from datetime import datetime
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
 from app.config import universe_path
-
 from app.models import UniverseAsset
-from app.repository import MetricRepository
-
+from app.paper_trading import PaperTradingEngine
+from app.repository import MetricRepository, PaperTradeRepository
 from app.universe import JsonMarketUniverseProvider
 
 
@@ -29,14 +29,18 @@ class ScannerRow(BaseModel):
 class DashboardState:
     """Concurrency-safe latest-value cache; PostgreSQL remains the history source."""
 
-    def __init__(self, universe: list[UniverseAsset]) -> None:
+    def __init__(
+        self, universe: list[UniverseAsset], paper_engine: PaperTradingEngine | None = None
+    ) -> None:
         self.universe = universe
+        self.paper_engine = paper_engine
         self._rows: dict[str, ScannerRow] = {}
         self._details: dict[str, dict[str, Any]] = {}
         self._subscribers: dict[str, set[asyncio.Queue[dict[str, Any]]]] = defaultdict(set)
         self._lock = asyncio.Lock()
 
     async def update_symbol(self, symbol: str, detail: dict[str, Any]) -> None:
+        symbol = symbol.upper()
         async with self._lock:
             self._details[symbol] = detail
             row = ScannerRow(
@@ -47,8 +51,11 @@ class DashboardState:
                 liquidity_fragility=detail.get("liquidity_fragility"),
             )
             self._rows[symbol] = row
+        paper_events = await self.paper_engine.process_update(symbol, detail) if self.paper_engine else []
         await self._broadcast("scanner", {"type": "scanner", "data": row.model_dump()})
         await self._broadcast(f"symbol:{symbol}", {"type": "symbol", "data": detail})
+        for event in paper_events:
+            await self._broadcast("paper", event)
 
     def scanner(self) -> list[ScannerRow]:
         return sorted(
@@ -76,13 +83,19 @@ class DashboardState:
 
 
 def create_app(
-    state: DashboardState | None = None, history_repository: MetricRepository | None = None
+    state: DashboardState | None = None,
+    history_repository: MetricRepository | None = None,
+    paper_repository: PaperTradeRepository | None = None,
+    paper_engine: PaperTradingEngine | None = None,
 ) -> FastAPI:
     if state is None:
-        state = DashboardState(JsonMarketUniverseProvider(universe_path()).load())
+        state = DashboardState(JsonMarketUniverseProvider(universe_path()).load(), paper_engine)
+    elif paper_engine is not None:
+        state.paper_engine = paper_engine
     app = FastAPI(title="CEX Liquidity & Flow Tracker")
     app.state.dashboard = state
     app.state.history_repository = history_repository
+    app.state.paper_repository = paper_repository
 
     @app.get("/api/universe", response_model=list[UniverseAsset])
     async def get_universe() -> list[UniverseAsset]:
@@ -108,6 +121,46 @@ def create_app(
             raise HTTPException(status_code=503, detail="historical metric store is unavailable")
         return await history_repository.history(normalized_symbol)
 
+    def require_paper_repository() -> PaperTradeRepository:
+        if paper_repository is None:
+            raise HTTPException(status_code=503, detail="paper trade store is unavailable")
+        return paper_repository
+
+    @app.get("/api/paper/positions")
+    async def get_paper_positions() -> list[dict[str, Any]]:
+        return await require_paper_repository().get_open_positions()
+
+    @app.get("/api/paper/trades")
+    async def get_paper_trades(
+        symbol: str | None = None,
+        side: str | None = None,
+        result: str | None = Query(default=None, pattern="^(open|win|loss)$"),
+        limit: int = Query(default=100, ge=1, le=1000),
+    ) -> list[dict[str, Any]]:
+        return await require_paper_repository().list_trades(symbol, side, result, limit)
+
+    @app.get("/api/paper/trades/{trade_id}")
+    async def get_paper_trade(trade_id: int) -> dict[str, Any]:
+        trade = await require_paper_repository().get_trade(trade_id)
+        if trade is None:
+            raise HTTPException(status_code=404, detail="paper trade does not exist")
+        history: dict[str, list[dict[str, Any]]] = {"market": [], "flow": [], "derivative": []}
+        if history_repository is not None:
+            end = _timestamp(trade.get("closed_at")) or datetime.now().astimezone()
+            history = await history_repository.history_range(
+                trade["symbol"], _timestamp(trade["opened_at"]), end
+            )
+        return {
+            "trade": trade,
+            "entry_snapshot": trade["signal_snapshot"],
+            "exit_snapshot": trade["exit_snapshot"],
+            "history": history,
+        }
+
+    @app.get("/api/paper/stats")
+    async def get_paper_stats() -> dict[str, Any]:
+        return await require_paper_repository().stats()
+
     @app.websocket("/ws/scanner")
     async def scanner_socket(websocket: WebSocket) -> None:
         await websocket.accept()
@@ -130,7 +183,24 @@ def create_app(
         except WebSocketDisconnect:
             return
 
+    @app.websocket("/ws/paper")
+    async def paper_socket(websocket: WebSocket) -> None:
+        await websocket.accept()
+        try:
+            positions = await require_paper_repository().get_open_positions()
+            await websocket.send_json({"type": "OPEN", "data": positions})
+            async for message in state.subscribe("paper"):
+                await websocket.send_json(message)
+        except WebSocketDisconnect:
+            return
+
     return app
 
+
+
+def _timestamp(value: object) -> datetime:
+    if isinstance(value, datetime):
+        return value
+    return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
 
 app = create_app()
