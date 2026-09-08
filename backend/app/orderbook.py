@@ -49,7 +49,30 @@ class LocalOrderBook:
         self._sequence = snapshot.sequence
         self._synchronized = True
 
-    def apply_binance_update(
+    def apply_binance_spot_update(
+        self,
+        *,
+        first_sequence: int,
+        final_sequence: int,
+        bids: Iterable[tuple[Decimal, Decimal]],
+        asks: Iterable[tuple[Decimal, Decimal]],
+    ) -> None:
+        current_sequence = self._require_sync()
+        is_first_increment = self._snapshot is not None and self._snapshot.sequence == current_sequence
+        if is_first_increment and final_sequence <= current_sequence:
+            return
+        valid = (
+            first_sequence <= current_sequence + 1 <= final_sequence
+            if is_first_increment
+            else first_sequence == current_sequence + 1
+        )
+        if not valid:
+            self._invalidate("Binance Spot depth sequence gap")
+        self._apply_levels(self._bids, bids)
+        self._apply_levels(self._asks, asks)
+        self._sequence = final_sequence
+
+    def apply_binance_futures_update(
         self,
         *,
         first_sequence: int,
@@ -66,7 +89,7 @@ class LocalOrderBook:
             else previous_final_sequence == current_sequence
         )
         if not valid:
-            self._invalidate("Binance depth sequence gap")
+            self._invalidate("Binance Futures depth sequence gap")
         self._apply_levels(self._bids, bids)
         self._apply_levels(self._asks, asks)
         self._sequence = final_sequence

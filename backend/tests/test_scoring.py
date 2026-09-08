@@ -17,17 +17,17 @@ class ScoringTests(unittest.TestCase):
         self.thresholds = ClassificationThresholds(pressure=2, cvd=10, oi_change=0.05)
 
     def test_classifies_spot_perp_and_mixed_signals(self) -> None:
-        signal = MarketSignal("binance", 3, 3, 20, 20, 0.1)
+        signal = MarketSignal("binance", 3, 0, 3, 0, 20, 20, 0.1)
         self.assertEqual(classify_move(signal, self.thresholds), MoveType.MIXED)
         self.assertEqual(
-            classify_move(MarketSignal("okx", 3, 1, 20, 0, 0), self.thresholds),
+            classify_move(MarketSignal("okx", 3, 0, 1, 0, 20, 0, 0), self.thresholds),
             MoveType.SPOT_DRIVEN,
         )
 
     def test_compares_exchange_confirmation_and_scores_independently(self) -> None:
         signals = [
-            MarketSignal("binance", 3, 0, 0, 0, 0),
-            MarketSignal("okx", 3, 0, 0, 0, 0),
+            MarketSignal("binance", 3, 0, 0, 0, 0, 0, 0),
+            MarketSignal("okx", 3, 0, 0, 0, 0, 0, 0),
         ]
         self.assertEqual(cross_exchange_state(signals, self.thresholds), CrossExchangeState.CONFIRMED)
         self.assertEqual(

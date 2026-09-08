@@ -13,7 +13,7 @@ import aiohttp
 
 from app.exchanges.binance import BinanceAdapter
 from app.exchanges.okx import OkxAdapter
-from app.models import MarketInstrument, OrderBook
+from app.models import MarketInstrument, MarketType, OrderBook
 from app.orderbook import LocalOrderBook, OrderBookSequenceGap, SequencedOrderBookSnapshot
 
 logger = logging.getLogger(__name__)
@@ -56,8 +56,7 @@ class _ResyncingCollector:
 
 
 class BinanceOrderBookCollector(_ResyncingCollector):
-    """Bootstrap from REST after opening WS, then enforce Binance ``pu`` continuity."""
-
+    """Bootstrap from REST, then apply Spot ``U``/``u`` or Futures ``pu`` continuity."""
     def __init__(
         self,
         session: aiohttp.ClientSession,
@@ -95,13 +94,21 @@ class BinanceOrderBookCollector(_ResyncingCollector):
                 if event.get("e") != "depthUpdate":
                     continue
                 try:
-                    self._book.apply_binance_update(
-                        first_sequence=_integer(event, "U"),
-                        final_sequence=_integer(event, "u"),
-                        previous_final_sequence=None if is_first_increment else _integer(event, "pu"),
-                        bids=_depth_levels(event.get("b")),
-                        asks=_depth_levels(event.get("a")),
-                    )
+                    if self._instrument.market is MarketType.SPOT:
+                        self._book.apply_binance_spot_update(
+                            first_sequence=_integer(event, "U"),
+                            final_sequence=_integer(event, "u"),
+                            bids=_depth_levels(event.get("b")),
+                            asks=_depth_levels(event.get("a")),
+                        )
+                    else:
+                        self._book.apply_binance_futures_update(
+                            first_sequence=_integer(event, "U"),
+                            final_sequence=_integer(event, "u"),
+                            previous_final_sequence=None if is_first_increment else _integer(event, "pu"),
+                            bids=_depth_levels(event.get("b")),
+                            asks=_depth_levels(event.get("a")),
+                        )
                 except (KeyError, ValueError, InvalidOperation) as error:
                     raise ValueError("invalid Binance depth update") from error
                 is_first_increment = False

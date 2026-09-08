@@ -21,17 +21,15 @@ class LocalOrderBookTests(unittest.TestCase):
         )
 
     def test_applies_contiguous_binance_updates(self) -> None:
-        self.book.apply_binance_update(
+        self.book.apply_binance_spot_update(
             first_sequence=11,
             final_sequence=11,
-            previous_final_sequence=None,
             bids=[(Decimal("99"), Decimal("2"))],
             asks=[],
         )
-        self.book.apply_binance_update(
+        self.book.apply_binance_spot_update(
             first_sequence=12,
             final_sequence=12,
-            previous_final_sequence=11,
             bids=[],
             asks=[(Decimal("101"), Decimal("0"))],
         )
@@ -43,10 +41,9 @@ class LocalOrderBookTests(unittest.TestCase):
 
     def test_gap_invalidates_book_until_new_snapshot(self) -> None:
         with self.assertRaises(OrderBookSequenceGap):
-            self.book.apply_binance_update(
+            self.book.apply_binance_spot_update(
                 first_sequence=12,
                 final_sequence=12,
-                previous_final_sequence=None,
                 bids=[],
                 asks=[],
             )
@@ -65,10 +62,9 @@ class LocalOrderBookTests(unittest.TestCase):
                 asks=[(Decimal("101"), Decimal("1"))],
             )
         )
-        self.book.apply_binance_update(
+        self.book.apply_binance_spot_update(
             first_sequence=21,
             final_sequence=21,
-            previous_final_sequence=None,
             bids=[],
             asks=[],
         )

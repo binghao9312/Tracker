@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from statistics import fmean
+
+from app.liquidity import LiquidityMetrics
 
 
 class MoveType(StrEnum):
@@ -24,7 +27,9 @@ class CrossExchangeState(StrEnum):
 class MarketSignal:
     exchange: str
     spot_buy_pressure: float | None
+    spot_sell_pressure: float | None
     perp_buy_pressure: float | None
+    perp_sell_pressure: float | None
     spot_cvd: float
     perp_cvd: float
     oi_change: float | None
@@ -57,8 +62,12 @@ def cross_exchange_state(signals: list[MarketSignal], thresholds: Classification
     if len(signals) < 2:
         return CrossExchangeState.SINGLE_EXCHANGE
     active = [
-        _above(signal.spot_buy_pressure, thresholds.pressure)
-        or _above(signal.perp_buy_pressure, thresholds.pressure)
+        max(
+            signal.spot_buy_pressure or 0,
+            signal.spot_sell_pressure or 0,
+            signal.perp_buy_pressure or 0,
+            signal.perp_sell_pressure or 0,
+        ) >= thresholds.pressure
         for signal in signals
     ]
     return CrossExchangeState.CONFIRMED if all(active) else CrossExchangeState.DIVERGENT
@@ -84,11 +93,60 @@ def liquidity_fragility_score(
     return round(fmean(components) * 100, 2)
 
 
+def liquidity_fragility_scores(
+    metrics_by_symbol: Mapping[str, list[LiquidityMetrics]],
+) -> dict[str, float]:
+    """Normalize each active symbol's venue-aggregated raw liquidity against its peers."""
+    raw_metrics = {
+        symbol: _aggregate_liquidity(metrics)
+        for symbol, metrics in metrics_by_symbol.items()
+    }
+    usable = {symbol: metric for symbol, metric in raw_metrics.items() if metric is not None}
+    if not usable:
+        return {symbol: 0.0 for symbol in metrics_by_symbol}
+    symbols = sorted(usable)
+    depth_2 = [usable[symbol][0] for symbol in symbols]
+    impact_10k = [usable[symbol][1] for symbol in symbols]
+    impact_50k = [usable[symbol][2] for symbol in symbols]
+    spread = [usable[symbol][3] for symbol in symbols]
+    capital_to_move_2 = [usable[symbol][4] for symbol in symbols]
+    return {
+        symbol: liquidity_fragility_score(
+            depth_2=depth_2,
+            impact_10k=impact_10k,
+            impact_50k=impact_50k,
+            spread=spread,
+            capital_to_move_2=capital_to_move_2,
+            index=index,
+        )
+        for index, symbol in enumerate(symbols)
+    } | {symbol: 0.0 for symbol in metrics_by_symbol if symbol not in usable}
+
+
+def _aggregate_liquidity(metrics: list[LiquidityMetrics]) -> tuple[float, float, float, float, float] | None:
+    usable = [
+        metric
+        for metric in metrics
+        if metric.buy_impacts[10_000] is not None
+        and metric.buy_impacts[50_000] is not None
+        and metric.capital_to_move_up[2] is not None
+    ]
+    if not usable:
+        return None
+    return (
+        fmean(metric.bid_depth_2 + metric.ask_depth_2 for metric in usable),
+        fmean(float(metric.buy_impacts[10_000]) for metric in usable),
+        fmean(float(metric.buy_impacts[50_000]) for metric in usable),
+        fmean(metric.spread_percent for metric in usable),
+        fmean(float(metric.capital_to_move_up[2]) for metric in usable),
+    )
+
+
 def activity_score(
-    pressure_1m: float, pressure_5m: float, cvd_change: float, oi_change: float, funding: float, confirmed: bool
+    pressure_1m: float, pressure_5m: float, cvd_ratio: float, oi_change: float, funding: float, confirmed: bool
 ) -> float:
-    """Visible bounded blend; intentionally independent from liquidity fragility."""
-    raw = 18 * min(pressure_1m, 3) + 22 * min(pressure_5m, 3) + 20 * min(abs(cvd_change), 1)
+    """Visible bounded blend; pressure and normalized CVD magnitude are direction-neutral."""
+    raw = 18 * min(pressure_1m, 3) + 22 * min(pressure_5m, 3) + 20 * min(abs(cvd_ratio), 1)
     raw += 20 * min(abs(oi_change), 1) + 10 * min(abs(funding) * 1_000, 1) + (10 if confirmed else 0)
     return round(min(raw, 100), 2)
 

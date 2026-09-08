@@ -29,7 +29,7 @@ from app.scoring import (
     activity_score,
     classify_move,
     cross_exchange_state,
-    liquidity_fragility_score,
+    liquidity_fragility_scores,
 )
 
 
@@ -110,12 +110,29 @@ class LiveRuntime:
         self._dirty_symbols.add(snapshot.symbol)
 
     async def flush(self) -> None:
-        """Persist and publish each changed symbol once; used by the one-second clock."""
-        symbols, self._dirty_symbols = self._dirty_symbols, set()
-        for symbol in sorted(symbols):
-            detail = await self._build_detail(symbol)
-            if detail is not None:
-                await self.state.update_symbol(symbol, detail)
+        """Build all active raw metrics before normalizing and publishing a cadence."""
+        self._dirty_symbols.clear()
+        monitored = {
+            f"{asset.symbol}USDT"
+            for asset in self.state.universe
+            if asset.enabled and asset.rank <= 50
+        }
+        active_symbols = sorted(
+            {symbol for _, symbol, _ in self._books if symbol in monitored}
+        )
+        metrics_by_symbol: dict[str, dict[tuple[Exchange, MarketType], LiquidityMetrics]] = {}
+        for symbol in active_symbols:
+            metrics_by_book = await self._collect_liquidities(symbol)
+            if metrics_by_book:
+                metrics_by_symbol[symbol] = metrics_by_book
+        fragilities = liquidity_fragility_scores(
+            {symbol: list(metrics.values()) for symbol, metrics in metrics_by_symbol.items()}
+        )
+        for symbol, metrics_by_book in metrics_by_symbol.items():
+            detail = await self._build_detail(
+                symbol, metrics_by_book, fragilities[symbol]
+            )
+            await self.state.update_symbol(symbol, detail)
 
     async def _run_cadence(self) -> None:
         while not self._stop.is_set():
@@ -159,7 +176,9 @@ class LiveRuntime:
             tasks.append(asyncio.create_task(collector.run(self._stop), name=f"derivatives:{instrument.exchange}:{instrument.symbol}"))
         return tasks
 
-    async def _build_detail(self, symbol: str) -> dict[str, Any] | None:
+    async def _collect_liquidities(
+        self, symbol: str
+    ) -> dict[tuple[Exchange, MarketType], LiquidityMetrics]:
         metrics_by_book: dict[tuple[Exchange, MarketType], LiquidityMetrics] = {}
         for (exchange, book_symbol, market), book in self._books.items():
             if book_symbol != symbol:
@@ -181,8 +200,14 @@ class LiveRuntime:
                 "buy_impact_50k": liquidity.buy_impacts[50_000], "sell_impact_50k": liquidity.sell_impacts[50_000],
                 "obi": liquidity.order_book_imbalance,
             })
-        if not metrics_by_book:
-            return None
+        return metrics_by_book
+
+    async def _build_detail(
+        self,
+        symbol: str,
+        metrics_by_book: dict[tuple[Exchange, MarketType], LiquidityMetrics],
+        fragility: float,
+    ) -> dict[str, Any]:
 
         market_flows: dict[MarketType, dict[str, float | None]] = {}
         exchange_signals: list[MarketSignal] = []
@@ -195,7 +220,9 @@ class LiveRuntime:
             exchange_signals.append(MarketSignal(
                 exchange.value,
                 spot.get(f"{exchange.value}:buy_pressure_5m"),
+                spot.get(f"{exchange.value}:sell_pressure_5m"),
                 perp.get(f"{exchange.value}:buy_pressure_5m"),
+                perp.get(f"{exchange.value}:sell_pressure_5m"),
                 float(spot.get(f"{exchange.value}:cvd_5m") or 0),
                 float(perp.get(f"{exchange.value}:cvd_5m") or 0),
                 self._oi_change(exchange, symbol),
@@ -211,14 +238,15 @@ class LiveRuntime:
         confirmed = cross_exchange_state(exchange_signals, self._thresholds)
         movement = [classify_move(signal, self._thresholds) for signal in exchange_signals]
         move_type = next((move.value for move in movement if move.value != "NEUTRAL"), "NEUTRAL")
-        fragility = self._fragility(list(metrics_by_book.values()))
         perp = market_flows[MarketType.PERP]
         price = self._preferred_price(metrics_by_book)
         detail = {
             "price": price,
             "activity_score": activity_score(
-                float(perp.get("buy_pressure_1m") or 0), float(perp.get("buy_pressure_5m") or 0),
-                float(perp.get("cvd_5m") or 0), max((self._oi_change(exchange, symbol) or 0 for exchange in Exchange), default=0),
+                max(float(perp.get("buy_pressure_1m") or 0), float(perp.get("sell_pressure_1m") or 0)),
+                max(float(perp.get("buy_pressure_5m") or 0), float(perp.get("sell_pressure_5m") or 0)),
+                self._delta_ratio(perp.get("buy_volume_5m"), perp.get("sell_volume_5m")),
+                max((self._oi_change(exchange, symbol) or 0 for exchange in Exchange), default=0),
                 self._funding(symbol), confirmed.value == "CONFIRMED",
             ),
             "liquidity_fragility": fragility,
@@ -326,15 +354,7 @@ class LiveRuntime:
         return pressure(float(value or 0), depth)
 
     @staticmethod
-    def _fragility(metrics: list[LiquidityMetrics]) -> float:
-        usable = [metric for metric in metrics if metric.buy_impacts[10_000] is not None and metric.buy_impacts[50_000] is not None and metric.capital_to_move_up[2] is not None]
-        if not usable:
-            return 0.0
-        return liquidity_fragility_score(
-            depth_2=[metric.bid_depth_2 + metric.ask_depth_2 for metric in usable],
-            impact_10k=[float(metric.buy_impacts[10_000]) for metric in usable],
-            impact_50k=[float(metric.buy_impacts[50_000]) for metric in usable],
-            spread=[metric.spread_percent for metric in usable],
-            capital_to_move_2=[float(metric.capital_to_move_up[2]) for metric in usable],
-            index=0,
-        )
+    def _delta_ratio(buy_volume: float | None, sell_volume: float | None) -> float:
+        buy, sell = float(buy_volume or 0), float(sell_volume or 0)
+        total = buy + sell
+        return (buy - sell) / total if total else 0.0
