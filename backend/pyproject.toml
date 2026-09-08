@@ -1,0 +1,34 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[project]
+name = "qtrade-backend"
+version = "0.1.0"
+description = "CEX liquidity and flow tracker backend"
+requires-python = ">=3.12"
+dependencies = [
+  "aiohttp>=3.11,<4",
+  "asyncpg>=0.30,<1",
+  "fastapi>=0.115,<1",
+  "pydantic>=2.10,<3",
+  "sqlalchemy>=2.0,<3",
+  "uvicorn[standard]>=0.34,<1",
+]
+
+[project.optional-dependencies]
+dev = ["httpx2>=2.12,<3", "pytest>=8.3,<9"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

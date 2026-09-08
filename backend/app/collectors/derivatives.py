@@ -1,0 +1,43 @@
+"""Thirty-second resilient polling for perpetual derivative snapshots."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from collections.abc import Awaitable, Callable
+
+from app.models import DerivativeSnapshot
+
+logger = logging.getLogger(__name__)
+SnapshotFetcher = Callable[[], Awaitable[DerivativeSnapshot]]
+SnapshotCallback = Callable[[DerivativeSnapshot], Awaitable[None]]
+
+
+class DerivativePollingCollector:
+    def __init__(
+        self,
+        fetch: SnapshotFetcher,
+        on_snapshot: SnapshotCallback,
+        interval_seconds: float = 30.0,
+    ) -> None:
+        self._fetch = fetch
+        self._on_snapshot = on_snapshot
+        self._interval = interval_seconds
+
+    async def run(self, stop: asyncio.Event) -> None:
+        delay = 1.0
+        while not stop.is_set():
+            try:
+                await self._on_snapshot(await self._fetch())
+                delay = 1.0
+                timeout = self._interval
+            except asyncio.CancelledError:
+                raise
+            except (OSError, ValueError) as error:
+                logger.warning("derivative_collector_retry", extra={"error": str(error)})
+                timeout = delay
+                delay = min(delay * 2, 30.0)
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=timeout)
+            except TimeoutError:
+                pass

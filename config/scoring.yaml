@@ -1,0 +1,7 @@
+classification:
+  pressure: 2.0
+  cvd: 0.0
+  oi_change: 0.05
+funding:
+  elevated_positive: 0.001
+  elevated_negative: -0.001
