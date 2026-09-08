@@ -12,7 +12,18 @@ docker compose up --build
 - API: `http://localhost:8001`
 - PostgreSQL: internal Compose service
 
-The backend loads `config/universe.json`, discovers currently live Binance/OKX markets, and uses only public market-data endpoints. Copy `.env.example` if a local non-Compose database URL or exchange credentials are required. Credentials are not needed for public data and no trading or account endpoints are implemented.
+The backend loads `config/universe.json`, discovers currently live Binance/OKX markets, and uses only public market-data endpoints. Configure `DATABASE_URL` only when using a local non-Compose database. Exchange credentials are never required: no trading or account endpoints are implemented.
+
+## Runtime smoke test
+
+After `docker compose up --build` reports both services ready, wait for public market-data subscriptions to establish and run:
+
+```sh
+curl http://localhost:8001/api/scanner
+curl http://localhost:8001/api/paper/positions
+```
+
+Expected result: the scanner response becomes a JSON array of monitored symbols with live `price`, `activity_score`, and `liquidity_fragility`; paper positions remains an empty JSON array until the configured local simulator opens a position. The runtime uses only public Binance and OKX market-data endpoints, persists normalized metrics once per second, and never submits an order.
 
 ## Development checks
 

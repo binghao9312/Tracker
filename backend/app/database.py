@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, DateTime, Float, ForeignKey, Index, String
+from sqlalchemy import JSON, DateTime, Float, ForeignKey, Index, String, text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -82,7 +82,13 @@ class PaperTradeRow(Base):
     __tablename__ = "paper_trades"
     __table_args__ = (
         Index("ix_paper_trades_symbol_opened", "symbol", "opened_at"),
-        Index("ix_paper_trades_status", "status"),
+        Index(
+            "uq_paper_trades_open_symbol",
+            "symbol",
+            unique=True,
+            postgresql_where=text("status = 'OPEN'"),
+            sqlite_where=text("status = 'OPEN'"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -138,6 +144,7 @@ class PaperTradeEventRow(Base):
     )
     snapshot: Mapped[dict[str, Any]] = mapped_column(JSON)
 
+
 def build_engine(database_url: str) -> AsyncEngine:
     return create_async_engine(database_url, pool_pre_ping=True)
 
@@ -145,6 +152,12 @@ def build_engine(database_url: str) -> AsyncEngine:
 async def create_schema(engine: AsyncEngine) -> None:
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
+        await connection.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_paper_trades_open_symbol "
+                "ON paper_trades (symbol) WHERE status = 'OPEN'"
+            )
+        )
 
 
 def session_factory(engine: AsyncEngine) -> async_sessionmaker:

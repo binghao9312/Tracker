@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -9,6 +10,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 import yaml
+from app.repository import DuplicateOpenTrade, PaperTradeRepository
 from app.trade_signal import TradeBias, TradeSignal, calculate_trade_signal
 
 
@@ -105,34 +107,56 @@ class PaperTradingEngine:
         self._positions: dict[str, dict[str, Any]] = {}
         self._arm_state: dict[str, ArmState] = {}
         self._high_since: dict[tuple[str, TradeBias], datetime] = {}
+        self._last_bias: dict[str, TradeBias] = {}
         self._cooldowns: dict[str, datetime] = {}
+        self._symbol_locks: dict[str, asyncio.Lock] = {}
 
-    async def recover_open_positions(self) -> None:
+    async def recover_open_positions(self, now: datetime | None = None) -> None:
+        now = now or datetime.now(UTC)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=UTC)
         self._positions = {row["symbol"]: row for row in await self.repository.get_open_positions()}
         self._arm_state.update({symbol: ArmState.TRIGGERED for symbol in self._positions})
+        recent_closed = await self.repository.get_recent_closed_positions(
+            now - timedelta(minutes=self.settings.cooldown_minutes)
+        )
+        for position in recent_closed:
+            closed_at = _as_datetime(position["closed_at"])
+            expires_at = closed_at + timedelta(minutes=self.settings.cooldown_minutes)
+            if expires_at > now:
+                self._arm_state[position["symbol"]] = ArmState.COOLDOWN
+                self._cooldowns[position["symbol"]] = expires_at
 
     async def process_update(
         self, symbol: str, detail: Mapping[str, Any], now: datetime | None = None
     ) -> list[dict[str, Any]]:
+        symbol = symbol.upper()
         now = now or datetime.now(UTC)
         if now.tzinfo is None:
             now = now.replace(tzinfo=UTC)
-        signal = calculate_trade_signal(detail)
-        events: list[dict[str, Any]] = []
-        position = self._positions.get(symbol)
-        if position is not None:
-            event = await self._maintain_position(position, detail, now)
-            if event is not None:
-                events.append(event)
-        if not self.settings.enabled:
+        lock = self._symbol_locks.setdefault(symbol, asyncio.Lock())
+        async with lock:
+            signal = calculate_trade_signal(detail)
+            events: list[dict[str, Any]] = []
+            position = self._positions.get(symbol)
+            if position is not None:
+                event = await self._maintain_position(position, detail, now)
+                if event is not None:
+                    events.append(event)
+            if not self.settings.enabled:
+                return events
+            events.extend(await self._consider_entry(symbol, detail, signal, now))
             return events
-        events.extend(await self._consider_entry(symbol, detail, signal, now))
-        return events
 
     async def _consider_entry(
         self, symbol: str, detail: Mapping[str, Any], signal: TradeSignal, now: datetime
     ) -> list[dict[str, Any]]:
         score = _number(detail, "activity_score")
+        previous_bias = self._last_bias.get(symbol)
+        if previous_bias is not signal.bias:
+            self._high_since.pop((symbol, TradeBias.LONG), None)
+            self._high_since.pop((symbol, TradeBias.SHORT), None)
+            self._last_bias[symbol] = signal.bias
         state = self._arm_state.get(symbol, ArmState.ARMED)
         cooldown = self._cooldowns.get(symbol)
         if state is ArmState.COOLDOWN and cooldown is not None and now >= cooldown:
@@ -169,7 +193,7 @@ class PaperTradingEngine:
         if execution is None:
             events.append(await self._event(now, symbol, "TRADE_SKIPPED", "NO_EXECUTION_MARKET", None, detail))
             return events
-        exchange, book = execution
+        exchange, market, book = execution
         try:
             fill = simulate_market_fill(book["asks"] if signal.bias is TradeBias.LONG else book["bids"], side="BUY" if signal.bias is TradeBias.LONG else "SELL", notional_usdt=self.settings.notional_usdt)
         except FillUnavailable as error:
@@ -179,7 +203,7 @@ class PaperTradingEngine:
         values = {
             "symbol": symbol,
             "exchange": exchange,
-            "market": "perp",
+            "market": market,
             "side": signal.bias.value,
             "status": "OPEN",
             "opened_at": now,
@@ -214,7 +238,11 @@ class PaperTradingEngine:
             "signal_snapshot": _json_safe(dict(detail) | {"trade_signal": signal.snapshot(), "entry_fill": asdict(fill)}),
             "exit_snapshot": None,
         }
-        trade = await self.repository.open_trade(values)
+        try:
+            trade = await self.repository.open_trade(values)
+        except DuplicateOpenTrade:
+            events.append(await self._event(now, symbol, "TRADE_SKIPPED", "ALREADY_OPEN", None, detail))
+            return events
         self._positions[symbol] = trade
         events.append(await self._event(now, symbol, "TRADE_OPENED", None, trade["id"], {"trade": trade}))
         return events
@@ -241,10 +269,14 @@ class PaperTradingEngine:
                 "max_adverse_excursion_pct": position["max_adverse_excursion_pct"],
             })
             return None
-        execution = _execution_book(detail)
+        execution = _execution_book(
+            detail,
+            exchange=str(position["exchange"]),
+            market=str(position["market"]),
+        )
         if execution is None:
             return await self._event(now, position["symbol"], "TRADE_SKIPPED", "NO_EXECUTION_MARKET", position["id"], detail)
-        _, book = execution
+        _, _, book = execution
         try:
             fill = simulate_market_fill(
                 book["bids"] if position["side"] == "LONG" else book["asks"],
@@ -274,27 +306,47 @@ class PaperTradingEngine:
         return {"type": {"TRADE_OPENED": "OPEN", "TRADE_CLOSED": "CLOSE", "TRADE_SKIPPED": "SKIP"}.get(event_type, event_type), "data": row}
 
 
-def _execution_book(detail: Mapping[str, Any]) -> tuple[str, Mapping[str, Any]] | None:
+def _execution_book(
+    detail: Mapping[str, Any],
+    *,
+    exchange: str | None = None,
+    market: str | None = None,
+) -> tuple[str, str, Mapping[str, Any]] | None:
     books = detail.get("orderbooks")
-    candidates: list[tuple[str, Mapping[str, Any]]] = []
-    def visit(value: object, exchange: str | None = None, market: str | None = None) -> None:
+    candidates: list[tuple[str, str, Mapping[str, Any]]] = []
+
+    def visit(value: object, current_exchange: str | None = None, current_market: str | None = None) -> None:
         if isinstance(value, Mapping):
-            current_exchange = str(value.get("exchange", exchange or "")).lower()
-            current_market = str(value.get("market", market or "")).lower()
-            if "bids" in value and "asks" in value and current_market in ("perp", "perpetual", "swap"):
-                candidates.append((current_exchange, value))
+            found_exchange = str(value.get("exchange", current_exchange or "")).lower()
+            found_market = str(value.get("market", current_market or "")).lower()
+            normalized_market = "perp" if found_market in ("perp", "perpetual", "swap") else found_market
+            if "bids" in value and "asks" in value and normalized_market == "perp":
+                candidates.append((found_exchange, normalized_market, value))
             for key, nested in value.items():
-                if key in {"bids", "asks"}:
-                    continue
-                visit(nested, key if key.lower() in {"binance", "okx"} else current_exchange, key if key.lower() in {"perp", "perpetual", "swap"} else current_market)
+                if key not in {"bids", "asks"}:
+                    visit(
+                        nested,
+                        key if key.lower() in {"binance", "okx"} else found_exchange,
+                        key if key.lower() in {"perp", "perpetual", "swap"} else found_market,
+                    )
         elif isinstance(value, list):
             for nested in value:
-                visit(nested, exchange, market)
+                visit(nested, current_exchange, current_market)
+
     visit(books)
+    target_exchange = exchange.lower() if exchange else None
+    target_market = ("perp" if market in {"perp", "perpetual", "swap"} else market) if market else None
+    for candidate_exchange, candidate_market, book in candidates:
+        if (target_exchange is None or candidate_exchange == target_exchange) and (
+            target_market is None or candidate_market == target_market
+        ):
+            return candidate_exchange, candidate_market, book
+    if target_exchange is not None:
+        return None
     for preferred in ("binance", "okx"):
-        for exchange, book in candidates:
-            if exchange == preferred:
-                return exchange, book
+        for candidate_exchange, candidate_market, book in candidates:
+            if candidate_exchange == preferred:
+                return candidate_exchange, candidate_market, book
     return None
 
 
@@ -343,7 +395,7 @@ def _reference_price(detail: Mapping[str, Any]) -> float | None:
         return float(value)
     execution = _execution_book(detail)
     if execution:
-        _, book = execution
+        _, _, book = execution
         bids, asks = _levels(book["bids"]), _levels(book["asks"])
         if bids and asks:
             return (bids[0][0] + asks[0][0]) / 2

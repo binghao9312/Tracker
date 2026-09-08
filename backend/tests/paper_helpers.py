@@ -23,6 +23,13 @@ class MemoryPaperRepository:
     async def get_open_positions(self) -> list[dict[str, Any]]:
         return [deepcopy(row) for row in self.rows.values() if row["status"] == "OPEN"]
 
+    async def get_recent_closed_positions(self, since: object) -> list[dict[str, Any]]:
+        return [
+            deepcopy(row)
+            for row in self.rows.values()
+            if row["status"] == "CLOSED" and row.get("closed_at") is not None and row["closed_at"] >= since
+        ]
+
     async def append_event(self, **values: Any) -> dict[str, Any]:
         row = dict(values) | {"id": len(self.events) + 1}
         self.events.append(row)

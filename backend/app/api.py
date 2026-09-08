@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.config import universe_path
 from app.models import UniverseAsset
@@ -26,6 +26,27 @@ class ScannerRow(BaseModel):
     liquidity_fragility: float | None = None
 
 
+class DashboardDetail(BaseModel):
+    """Canonical normalized state emitted by the live runtime."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    price: float | None = None
+    activity_score: float | None = None
+    liquidity_fragility: float | None = None
+    move_type: str | None = None
+    cross_exchange_state: str | None = None
+    oi_change_5m: float | None = None
+    funding: float | None = None
+    buy_pressure_1m: float | None = None
+    buy_pressure_5m: float | None = None
+    sell_pressure_1m: float | None = None
+    sell_pressure_5m: float | None = None
+    spot: dict[str, Any] = Field(default_factory=dict)
+    perp: dict[str, Any] = Field(default_factory=dict)
+    orderbooks: dict[str, Any] = Field(default_factory=dict)
+
+
 class DashboardState:
     """Concurrency-safe latest-value cache; PostgreSQL remains the history source."""
 
@@ -34,6 +55,7 @@ class DashboardState:
     ) -> None:
         self.universe = universe
         self.paper_engine = paper_engine
+        self._rank_by_symbol = {f"{asset.symbol}USDT": asset.rank for asset in universe}
         self._rows: dict[str, ScannerRow] = {}
         self._details: dict[str, dict[str, Any]] = {}
         self._subscribers: dict[str, set[asyncio.Queue[dict[str, Any]]]] = defaultdict(set)
@@ -41,19 +63,22 @@ class DashboardState:
 
     async def update_symbol(self, symbol: str, detail: dict[str, Any]) -> None:
         symbol = symbol.upper()
+        canonical = DashboardDetail.model_validate(detail).model_dump()
+        if symbol not in self._rank_by_symbol:
+            raise ValueError(f"{symbol} is not in the monitored universe")
         async with self._lock:
-            self._details[symbol] = detail
+            self._details[symbol] = canonical
             row = ScannerRow(
                 symbol=symbol,
-                market_cap_rank=next(asset.rank for asset in self.universe if f"{asset.symbol}USDT" == symbol),
-                price=detail.get("price"),
-                activity_score=detail.get("activity_score"),
-                liquidity_fragility=detail.get("liquidity_fragility"),
+                market_cap_rank=self._rank_by_symbol[symbol],
+                price=canonical["price"],
+                activity_score=canonical["activity_score"],
+                liquidity_fragility=canonical["liquidity_fragility"],
             )
             self._rows[symbol] = row
-        paper_events = await self.paper_engine.process_update(symbol, detail) if self.paper_engine else []
+        paper_events = await self.paper_engine.process_update(symbol, canonical) if self.paper_engine else []
         await self._broadcast("scanner", {"type": "scanner", "data": row.model_dump()})
-        await self._broadcast(f"symbol:{symbol}", {"type": "symbol", "data": detail})
+        await self._broadcast(f"symbol:{symbol}", {"type": "symbol", "data": canonical})
         for event in paper_events:
             await self._broadcast("paper", event)
 
@@ -145,10 +170,14 @@ def create_app(
         if trade is None:
             raise HTTPException(status_code=404, detail="paper trade does not exist")
         history: dict[str, list[dict[str, Any]]] = {"market": [], "flow": [], "derivative": []}
+        end = _timestamp(trade.get("closed_at")) or datetime.now().astimezone()
         if history_repository is not None:
-            end = _timestamp(trade.get("closed_at")) or datetime.now().astimezone()
             history = await history_repository.history_range(
-                trade["symbol"], _timestamp(trade["opened_at"]), end
+                trade["symbol"],
+                _timestamp(trade["opened_at"]),
+                end,
+                exchange=trade["exchange"],
+                market=trade["market"],
             )
         return {
             "trade": trade,
