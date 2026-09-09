@@ -58,7 +58,13 @@ class OpenInterestHistory:
         return (current - prior.open_interest) / prior.open_interest
 
 
-def funding_state(rate: float | None, positive_threshold: float, negative_threshold: float) -> FundingState:
+def funding_state(
+    rate: float | None, positive_threshold: float, negative_threshold: float
+) -> FundingState:
     if rate is None or negative_threshold < rate < positive_threshold:
         return FundingState.NORMAL
-    return FundingState.ELEVATED_POSITIVE if rate >= positive_threshold else FundingState.ELEVATED_NEGATIVE
+    return (
+        FundingState.ELEVATED_POSITIVE
+        if rate >= positive_threshold
+        else FundingState.ELEVATED_NEGATIVE
+    )

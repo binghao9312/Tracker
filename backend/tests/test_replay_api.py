@@ -14,15 +14,25 @@ class ReplayMetrics:
 
     async def history_range(self, *args: object, **kwargs: object) -> dict:
         self.args = args, kwargs
-        return {"market": [{"timestamp": 1_735_689_600_000, "price": 101.0}], "flow": [], "derivative": []}
+        return {
+            "market": [{"timestamp": 1_735_689_600_000, "price": 101.0}],
+            "flow": [],
+            "derivative": [],
+        }
 
 
 class ReplayTrades:
     async def get_trade(self, _: int) -> dict:
         return {
-            "id": 1, "symbol": "BTCUSDT", "exchange": "okx", "market": "perp", "status": "CLOSED",
-            "opened_at": datetime(2025, 1, 1, tzinfo=UTC).isoformat(), "closed_at": datetime(2025, 1, 1, 0, 1, tzinfo=UTC).isoformat(),
-            "signal_snapshot": {}, "exit_snapshot": {},
+            "id": 1,
+            "symbol": "BTCUSDT",
+            "exchange": "okx",
+            "market": "perp",
+            "status": "CLOSED",
+            "opened_at": datetime(2025, 1, 1, tzinfo=UTC).isoformat(),
+            "closed_at": datetime(2025, 1, 1, 0, 1, tzinfo=UTC).isoformat(),
+            "signal_snapshot": {},
+            "exit_snapshot": {},
         }
 
 
@@ -31,7 +41,9 @@ class ReplayApiRegressionTests(unittest.TestCase):
         state = DashboardState([UniverseAsset(rank=1, symbol="BTC", name="Bitcoin")])
         asyncio.run(state.update_symbol("BTCUSDT", {"price": 100.0}))
         history = ReplayMetrics()
-        client = TestClient(create_app(state, history_repository=history, paper_repository=ReplayTrades()))
+        client = TestClient(
+            create_app(state, history_repository=history, paper_repository=ReplayTrades())
+        )
 
         response = client.get("/api/paper/trades/1")
 

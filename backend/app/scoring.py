@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+from math import isfinite
+from pathlib import Path
 from statistics import fmean
+
+import yaml
 
 from app.liquidity import LiquidityMetrics
 
@@ -43,9 +47,49 @@ class _Direction(StrEnum):
 
 @dataclass(frozen=True)
 class ClassificationThresholds:
-    pressure: float
-    cvd: float
-    oi_change: float
+    pressure: float = 2.0
+    cvd: float = 0.0
+    oi_change: float = 0.05
+    allow_missing_cvd: bool = False
+
+    def __post_init__(self) -> None:
+        for field in ("pressure", "cvd", "oi_change"):
+            object.__setattr__(self, field, _nonnegative_float(field, getattr(self, field)))
+        if not isinstance(self.allow_missing_cvd, bool):
+            raise ValueError("allow_missing_cvd must be a boolean")
+
+
+def load_classification_thresholds(path: Path) -> ClassificationThresholds:
+    """Load validated classification thresholds from the scoring configuration."""
+    values = _scoring_section(path, "classification")
+    required = {"pressure", "cvd", "oi_change"}
+    missing = required - values.keys()
+    if missing:
+        raise ValueError(f"classification configuration is missing: {', '.join(sorted(missing))}")
+    try:
+        return ClassificationThresholds(**dict(values))
+    except TypeError as exc:
+        raise ValueError("classification configuration has unsupported values") from exc
+
+
+def _scoring_section(path: Path, section: str) -> Mapping[str, object]:
+    with path.open(encoding="utf-8") as file:
+        configured = yaml.safe_load(file)
+    if not isinstance(configured, Mapping):
+        raise ValueError("scoring configuration must be a mapping")
+    values = configured.get(section)
+    if not isinstance(values, Mapping):
+        raise ValueError(f"{section} configuration must be a mapping")
+    return values
+
+
+def _nonnegative_float(field: str, value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{field} must be a finite nonnegative number")
+    number = float(value)
+    if not isfinite(number) or number < 0:
+        raise ValueError(f"{field} must be a finite nonnegative number")
+    return number
 
 
 def classify_move(signal: MarketSignal, thresholds: ClassificationThresholds) -> MoveType:
@@ -55,7 +99,9 @@ def classify_move(signal: MarketSignal, thresholds: ClassificationThresholds) ->
     perp_direction = _market_direction(
         signal.perp_buy_pressure, signal.perp_sell_pressure, signal.perp_cvd, thresholds
     )
-    perp_active = perp_direction is not _Direction.NONE and _above(signal.oi_change, thresholds.oi_change)
+    perp_active = perp_direction is not _Direction.NONE and _above(
+        signal.oi_change, thresholds.oi_change
+    )
     if spot_direction is not _Direction.NONE and perp_active:
         return MoveType.MIXED if spot_direction is perp_direction else MoveType.NEUTRAL
     if spot_direction is not _Direction.NONE:
@@ -65,7 +111,9 @@ def classify_move(signal: MarketSignal, thresholds: ClassificationThresholds) ->
     return MoveType.NEUTRAL
 
 
-def cross_exchange_state(signals: list[MarketSignal], thresholds: ClassificationThresholds) -> CrossExchangeState:
+def cross_exchange_state(
+    signals: list[MarketSignal], thresholds: ClassificationThresholds
+) -> CrossExchangeState:
     if len(signals) < 2:
         return CrossExchangeState.SINGLE_EXCHANGE
     directions = [_exchange_direction(signal, thresholds) for signal in signals]
@@ -74,6 +122,22 @@ def cross_exchange_state(signals: list[MarketSignal], thresholds: Classification
     ):
         return CrossExchangeState.CONFIRMED
     return CrossExchangeState.DIVERGENT
+
+
+def exchange_directions(
+    signals: Iterable[MarketSignal], thresholds: ClassificationThresholds
+) -> dict[str, str]:
+    """Return each exchange direction used for confirmation and dashboard evidence."""
+    return {signal.exchange: _exchange_direction(signal, thresholds).value for signal in signals}
+
+
+def aggregate_move_type(move_types: Iterable[MoveType]) -> MoveType:
+    """Combine exchange classifications without relying on exchange or enum order."""
+    non_neutral = {move_type for move_type in move_types if move_type is not MoveType.NEUTRAL}
+    if not non_neutral:
+        return MoveType.NEUTRAL
+    return non_neutral.pop() if len(non_neutral) == 1 else MoveType.MIXED
+
 
 def _exchange_direction(signal: MarketSignal, thresholds: ClassificationThresholds) -> _Direction:
     directions = {
@@ -95,12 +159,25 @@ def _market_direction(
     thresholds: ClassificationThresholds,
 ) -> _Direction:
     buy, sell = buy_pressure or 0, sell_pressure or 0
-    if buy >= thresholds.pressure and buy > sell and (cvd is None or cvd >= thresholds.cvd):
+    if buy >= thresholds.pressure and buy > sell and _cvd_confirms(cvd, _Direction.BUY, thresholds):
         return _Direction.BUY
-    if sell >= thresholds.pressure and sell > buy and (cvd is None or cvd <= -thresholds.cvd):
+    if (
+        sell >= thresholds.pressure
+        and sell > buy
+        and _cvd_confirms(cvd, _Direction.SELL, thresholds)
+    ):
         return _Direction.SELL
     return _Direction.NONE
 
+
+def _cvd_confirms(
+    cvd: float | None, direction: _Direction, thresholds: ClassificationThresholds
+) -> bool:
+    if cvd is None:
+        return thresholds.allow_missing_cvd
+    if direction is _Direction.BUY:
+        return cvd > thresholds.cvd
+    return cvd < -thresholds.cvd
 
 
 def liquidity_fragility_score(
@@ -128,8 +205,7 @@ def liquidity_fragility_scores(
 ) -> dict[str, float]:
     """Normalize each active symbol's venue-aggregated raw liquidity against its peers."""
     raw_metrics = {
-        symbol: _aggregate_liquidity(metrics)
-        for symbol, metrics in metrics_by_symbol.items()
+        symbol: _aggregate_liquidity(metrics) for symbol, metrics in metrics_by_symbol.items()
     }
     usable = {symbol: metric for symbol, metric in raw_metrics.items() if metric is not None}
     if not usable:
@@ -153,7 +229,9 @@ def liquidity_fragility_scores(
     } | {symbol: 0.0 for symbol in metrics_by_symbol if symbol not in usable}
 
 
-def _aggregate_liquidity(metrics: list[LiquidityMetrics]) -> tuple[float, float, float, float, float] | None:
+def _aggregate_liquidity(
+    metrics: list[LiquidityMetrics],
+) -> tuple[float, float, float, float, float] | None:
     usable = [
         metric
         for metric in metrics
@@ -173,12 +251,80 @@ def _aggregate_liquidity(metrics: list[LiquidityMetrics]) -> tuple[float, float,
 
 
 def activity_score(
-    pressure_1m: float, pressure_5m: float, cvd_ratio: float, oi_change: float, funding: float, confirmed: bool
+    pressure_1m: float | None = None,
+    pressure_5m: float | None = None,
+    cvd_ratio: float | None = None,
+    oi_change: float | None = None,
+    funding: float | None = None,
+    confirmed: bool = False,
+    *,
+    spot_pressure_1m: float | None = None,
+    spot_pressure_5m: float | None = None,
+    spot_cvd_ratio: float | None = None,
+    perp_pressure_1m: float | None = None,
+    perp_pressure_5m: float | None = None,
+    perp_cvd_ratio: float | None = None,
 ) -> float:
-    """Visible bounded blend; pressure and normalized CVD magnitude are direction-neutral."""
-    raw = 18 * min(pressure_1m, 3) + 22 * min(pressure_5m, 3) + 20 * min(abs(cvd_ratio), 1)
-    raw += 20 * min(abs(oi_change), 1) + 10 * min(abs(funding) * 1_000, 1) + (10 if confirmed else 0)
-    return round(min(raw, 100), 2)
+    """Score market abnormality from bounded, direction-neutral available inputs.
+
+    Positional inputs retain the original single-market call shape. New callers pass
+    spot and perpetual inputs explicitly; absent markets are excluded from each
+    component's average instead of being interpreted as zero activity.
+    """
+    if spot_pressure_1m is None:
+        spot_pressure_1m = pressure_1m
+    if spot_pressure_5m is None:
+        spot_pressure_5m = pressure_5m
+    if spot_cvd_ratio is None:
+        spot_cvd_ratio = cvd_ratio
+
+    pressure_component = _available_mean(
+        (
+            _market_pressure(spot_pressure_1m, spot_pressure_5m),
+            _market_pressure(perp_pressure_1m, perp_pressure_5m),
+        )
+    )
+    flow_component = _available_mean(
+        (
+            _optional_bounded_magnitude(spot_cvd_ratio),
+            _optional_bounded_magnitude(perp_cvd_ratio),
+        )
+    )
+    components = (
+        50 * pressure_component,
+        30 * flow_component,
+        10 * _bounded_magnitude(oi_change),
+        5 * _bounded_magnitude(funding, scale=1_000),
+        5 if confirmed else 0,
+    )
+    return round(min(sum(components), 100), 2)
+
+
+def _market_pressure(pressure_1m: float | None, pressure_5m: float | None) -> float | None:
+    """Blend available pressure windows while keeping the short window responsive."""
+    weighted = (
+        (pressure_1m, 0.45),
+        (pressure_5m, 0.55),
+    )
+    available = [(value, weight) for value, weight in weighted if value is not None]
+    if not available:
+        return None
+    return sum(min(abs(value) / 3, 1.0) * weight for value, weight in available) / sum(
+        weight for _, weight in available
+    )
+
+
+def _available_mean(values: Iterable[float | None]) -> float:
+    available = [value for value in values if value is not None]
+    return fmean(available) if available else 0.0
+
+
+def _bounded_magnitude(value: float | None, *, scale: float = 1.0) -> float:
+    return min(abs(value) * scale, 1.0) if value is not None else 0.0
+
+
+def _optional_bounded_magnitude(value: float | None) -> float | None:
+    return _bounded_magnitude(value) if value is not None else None
 
 
 def _above(value: float | None, threshold: float) -> bool:

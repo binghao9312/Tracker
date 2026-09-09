@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 import yaml
+
 from app.repository import DuplicateOpenTrade, PaperTradeRepository
-from app.trade_signal import TradeBias, TradeSignal, calculate_trade_signal
+from app.trade_signal import TradeBias, TradeSignal, TradeSignalThresholds, calculate_trade_signal
 
 
 class ArmState(StrEnum):
@@ -79,7 +81,11 @@ def simulate_market_fill(
     filled_quantity = 0.0
     filled_quote = 0.0
     for price, available in ordered:
-        take = min(available, remaining_quantity) if quantity is not None else min(available, remaining_quote / price)
+        take = (
+            min(available, remaining_quantity)
+            if quantity is not None
+            else min(available, remaining_quote / price)
+        )
         if take <= 0:
             continue
         filled_quantity += take
@@ -94,16 +100,24 @@ def simulate_market_fill(
             vwap = filled_quote / filled_quantity
             best_price = ordered[0][0]
             slippage = (vwap - best_price) / best_price * (1 if side.upper() == "BUY" else -1)
-            return SimulatedFill(vwap=vwap, quantity=filled_quantity, quote_notional=filled_quote, slippage=slippage)
+            return SimulatedFill(
+                vwap=vwap, quantity=filled_quantity, quote_notional=filled_quote, slippage=slippage
+            )
     raise FillUnavailable("INSUFFICIENT_BOOK_DEPTH")
 
 
 class PaperTradingEngine:
     """Stateful, durable simulator. It only consumes already-normalized public state."""
 
-    def __init__(self, repository: PaperTradeRepository, settings: PaperTradingSettings | None = None) -> None:
+    def __init__(
+        self,
+        repository: PaperTradeRepository,
+        settings: PaperTradingSettings | None = None,
+        signal_thresholds: TradeSignalThresholds | None = None,
+    ) -> None:
         self.repository = repository
         self.settings = settings or PaperTradingSettings()
+        self._signal_thresholds = signal_thresholds or TradeSignalThresholds()
         self._positions: dict[str, dict[str, Any]] = {}
         self._arm_state: dict[str, ArmState] = {}
         self._high_since: dict[tuple[str, TradeBias], datetime] = {}
@@ -136,7 +150,7 @@ class PaperTradingEngine:
             now = now.replace(tzinfo=UTC)
         lock = self._symbol_locks.setdefault(symbol, asyncio.Lock())
         async with lock:
-            signal = calculate_trade_signal(detail)
+            signal = calculate_trade_signal(detail, self._signal_thresholds)
             events: list[dict[str, Any]] = []
             position = self._positions.get(symbol)
             if position is not None:
@@ -170,34 +184,62 @@ class PaperTradingEngine:
             self._high_since.pop((symbol, TradeBias.LONG), None)
             self._high_since.pop((symbol, TradeBias.SHORT), None)
             return [await self._event(now, symbol, "REARMED", None, None, detail)]
-        if state is not ArmState.ARMED or score < self.settings.entry_activity_score or signal.bias is TradeBias.NONE:
+        if (
+            state is not ArmState.ARMED
+            or score < self.settings.entry_activity_score
+            or signal.bias is TradeBias.NONE
+        ):
             if signal.bias is TradeBias.NONE or score < self.settings.entry_activity_score:
                 self._high_since.pop((symbol, TradeBias.LONG), None)
                 self._high_since.pop((symbol, TradeBias.SHORT), None)
             return []
-        if self.settings.require_cross_exchange_confirmation and signal.cross_exchange_state != "CONFIRMED":
+        if (
+            self.settings.require_cross_exchange_confirmation
+            and signal.cross_exchange_state != "CONFIRMED"
+        ):
             return []
         key = (symbol, signal.bias)
         since = self._high_since.setdefault(key, now)
         if (now - since).total_seconds() < self.settings.signal_persistence_seconds:
             return []
         self._arm_state[symbol] = ArmState.TRIGGERED
-        events = [await self._event(now, symbol, "SIGNAL_TRIGGERED", None, None, detail | {"trade_signal": signal.snapshot()})]
+        events = [
+            await self._event(
+                now,
+                symbol,
+                "SIGNAL_TRIGGERED",
+                None,
+                None,
+                detail | {"trade_signal": signal.snapshot()},
+            )
+        ]
         if symbol in self._positions:
-            events.append(await self._event(now, symbol, "TRADE_SKIPPED", "ALREADY_OPEN", None, detail))
+            events.append(
+                await self._event(now, symbol, "TRADE_SKIPPED", "ALREADY_OPEN", None, detail)
+            )
             return events
         if len(self._positions) >= self.settings.max_open_positions:
-            events.append(await self._event(now, symbol, "TRADE_SKIPPED", "MAX_OPEN_POSITIONS", None, detail))
+            events.append(
+                await self._event(now, symbol, "TRADE_SKIPPED", "MAX_OPEN_POSITIONS", None, detail)
+            )
             return events
         execution = _execution_book(detail)
         if execution is None:
-            events.append(await self._event(now, symbol, "TRADE_SKIPPED", "NO_EXECUTION_MARKET", None, detail))
+            events.append(
+                await self._event(now, symbol, "TRADE_SKIPPED", "NO_EXECUTION_MARKET", None, detail)
+            )
             return events
         exchange, market, book = execution
         try:
-            fill = simulate_market_fill(book["asks"] if signal.bias is TradeBias.LONG else book["bids"], side="BUY" if signal.bias is TradeBias.LONG else "SELL", notional_usdt=self.settings.notional_usdt)
+            fill = simulate_market_fill(
+                book["asks"] if signal.bias is TradeBias.LONG else book["bids"],
+                side="BUY" if signal.bias is TradeBias.LONG else "SELL",
+                notional_usdt=self.settings.notional_usdt,
+            )
         except FillUnavailable as error:
-            events.append(await self._event(now, symbol, "TRADE_SKIPPED", error.reason, None, detail))
+            events.append(
+                await self._event(now, symbol, "TRADE_SKIPPED", error.reason, None, detail)
+            )
             return events
         entry_fee = fill.quote_notional * self.settings.fee_bps / 10_000
         values = {
@@ -235,16 +277,22 @@ class PaperTradingEngine:
             "exit_reason": None,
             "holding_seconds": None,
             "settings_snapshot": asdict(self.settings),
-            "signal_snapshot": _json_safe(dict(detail) | {"trade_signal": signal.snapshot(), "entry_fill": asdict(fill)}),
+            "signal_snapshot": _json_safe(
+                dict(detail) | {"trade_signal": signal.snapshot(), "entry_fill": asdict(fill)}
+            ),
             "exit_snapshot": None,
         }
         try:
             trade = await self.repository.open_trade(values)
         except DuplicateOpenTrade:
-            events.append(await self._event(now, symbol, "TRADE_SKIPPED", "ALREADY_OPEN", None, detail))
+            events.append(
+                await self._event(now, symbol, "TRADE_SKIPPED", "ALREADY_OPEN", None, detail)
+            )
             return events
         self._positions[symbol] = trade
-        events.append(await self._event(now, symbol, "TRADE_OPENED", None, trade["id"], {"trade": trade}))
+        events.append(
+            await self._event(now, symbol, "TRADE_OPENED", None, trade["id"], {"trade": trade})
+        )
         return events
 
     async def _maintain_position(
@@ -254,20 +302,33 @@ class PaperTradingEngine:
         if reference_price is None:
             return None
         entry = position["entry_price"]
-        signed_return = ((reference_price - entry) / entry) * (1 if position["side"] == "LONG" else -1)
-        position["max_favorable_excursion_pct"] = max(position["max_favorable_excursion_pct"], signed_return)
-        position["max_adverse_excursion_pct"] = min(position["max_adverse_excursion_pct"], signed_return)
+        signed_return = ((reference_price - entry) / entry) * (
+            1 if position["side"] == "LONG" else -1
+        )
+        position["max_favorable_excursion_pct"] = max(
+            position["max_favorable_excursion_pct"], signed_return
+        )
+        position["max_adverse_excursion_pct"] = min(
+            position["max_adverse_excursion_pct"], signed_return
+        )
         elapsed = (now - _as_datetime(position["opened_at"])).total_seconds()
         reason = (
-            "TAKE_PROFIT" if signed_return >= self.settings.take_profit_pct else
-            "STOP_LOSS" if signed_return <= -self.settings.stop_loss_pct else
-            "TIME_STOP" if elapsed >= self.settings.max_holding_minutes * 60 else None
+            "TAKE_PROFIT"
+            if signed_return >= self.settings.take_profit_pct
+            else "STOP_LOSS"
+            if signed_return <= -self.settings.stop_loss_pct
+            else "TIME_STOP"
+            if elapsed >= self.settings.max_holding_minutes * 60
+            else None
         )
         if reason is None:
-            await self.repository.close_trade(position["id"], {
-                "max_favorable_excursion_pct": position["max_favorable_excursion_pct"],
-                "max_adverse_excursion_pct": position["max_adverse_excursion_pct"],
-            })
+            await self.repository.close_trade(
+                position["id"],
+                {
+                    "max_favorable_excursion_pct": position["max_favorable_excursion_pct"],
+                    "max_adverse_excursion_pct": position["max_adverse_excursion_pct"],
+                },
+            )
             return None
         execution = _execution_book(
             detail,
@@ -275,7 +336,14 @@ class PaperTradingEngine:
             market=str(position["market"]),
         )
         if execution is None:
-            return await self._event(now, position["symbol"], "TRADE_SKIPPED", "NO_EXECUTION_MARKET", position["id"], detail)
+            return await self._event(
+                now,
+                position["symbol"],
+                "TRADE_SKIPPED",
+                "NO_EXECUTION_MARKET",
+                position["id"],
+                detail,
+            )
         _, _, book = execution
         try:
             fill = simulate_market_fill(
@@ -284,26 +352,63 @@ class PaperTradingEngine:
                 quantity=position["quantity"],
             )
         except FillUnavailable as error:
-            return await self._event(now, position["symbol"], "TRADE_SKIPPED", error.reason, position["id"], detail)
-        gross = (fill.vwap - entry) * position["quantity"] * (1 if position["side"] == "LONG" else -1)
+            return await self._event(
+                now, position["symbol"], "TRADE_SKIPPED", error.reason, position["id"], detail
+            )
+        gross = (
+            (fill.vwap - entry) * position["quantity"] * (1 if position["side"] == "LONG" else -1)
+        )
         exit_fee = fill.quote_notional * self.settings.fee_bps / 10_000
         net = gross - position["entry_fee"] - exit_fee
-        closed = await self.repository.close_trade(position["id"], {
-            "status": "CLOSED", "closed_at": now, "exit_price": fill.vwap, "exit_fee": exit_fee,
-            "gross_pnl": gross, "net_pnl": net, "return_pct": net / position["notional_usdt"],
-            "max_favorable_excursion_pct": position["max_favorable_excursion_pct"],
-            "max_adverse_excursion_pct": position["max_adverse_excursion_pct"],
-            "exit_reason": reason, "holding_seconds": elapsed,
-            "exit_snapshot": _json_safe(dict(detail) | {"exit_fill": asdict(fill)}),
-        })
+        closed = await self.repository.close_trade(
+            position["id"],
+            {
+                "status": "CLOSED",
+                "closed_at": now,
+                "exit_price": fill.vwap,
+                "exit_fee": exit_fee,
+                "gross_pnl": gross,
+                "net_pnl": net,
+                "return_pct": net / position["notional_usdt"],
+                "max_favorable_excursion_pct": position["max_favorable_excursion_pct"],
+                "max_adverse_excursion_pct": position["max_adverse_excursion_pct"],
+                "exit_reason": reason,
+                "holding_seconds": elapsed,
+                "exit_snapshot": _json_safe(dict(detail) | {"exit_fill": asdict(fill)}),
+            },
+        )
         self._positions.pop(position["symbol"], None)
         self._arm_state[position["symbol"]] = ArmState.COOLDOWN
-        self._cooldowns[position["symbol"]] = now + timedelta(minutes=self.settings.cooldown_minutes)
-        return await self._event(now, position["symbol"], "TRADE_CLOSED", reason, closed["id"], {"trade": closed})
+        self._cooldowns[position["symbol"]] = now + timedelta(
+            minutes=self.settings.cooldown_minutes
+        )
+        return await self._event(
+            now, position["symbol"], "TRADE_CLOSED", reason, closed["id"], {"trade": closed}
+        )
 
-    async def _event(self, timestamp: datetime, symbol: str, event_type: str, reason: str | None, trade_id: int | None, snapshot: Mapping[str, Any]) -> dict[str, Any]:
-        row = await self.repository.append_event(timestamp=timestamp, symbol=symbol, event_type=event_type, reason=reason, trade_id=trade_id, snapshot=_json_safe(snapshot))
-        return {"type": {"TRADE_OPENED": "OPEN", "TRADE_CLOSED": "CLOSE", "TRADE_SKIPPED": "SKIP"}.get(event_type, event_type), "data": row}
+    async def _event(
+        self,
+        timestamp: datetime,
+        symbol: str,
+        event_type: str,
+        reason: str | None,
+        trade_id: int | None,
+        snapshot: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        row = await self.repository.append_event(
+            timestamp=timestamp,
+            symbol=symbol,
+            event_type=event_type,
+            reason=reason,
+            trade_id=trade_id,
+            snapshot=_json_safe(snapshot),
+        )
+        return {
+            "type": {"TRADE_OPENED": "OPEN", "TRADE_CLOSED": "CLOSE", "TRADE_SKIPPED": "SKIP"}.get(
+                event_type, event_type
+            ),
+            "data": row,
+        }
 
 
 def _execution_book(
@@ -315,11 +420,15 @@ def _execution_book(
     books = detail.get("orderbooks")
     candidates: list[tuple[str, str, Mapping[str, Any]]] = []
 
-    def visit(value: object, current_exchange: str | None = None, current_market: str | None = None) -> None:
+    def visit(
+        value: object, current_exchange: str | None = None, current_market: str | None = None
+    ) -> None:
         if isinstance(value, Mapping):
             found_exchange = str(value.get("exchange", current_exchange or "")).lower()
             found_market = str(value.get("market", current_market or "")).lower()
-            normalized_market = "perp" if found_market in ("perp", "perpetual", "swap") else found_market
+            normalized_market = (
+                "perp" if found_market in ("perp", "perpetual", "swap") else found_market
+            )
             if "bids" in value and "asks" in value and normalized_market == "perp":
                 candidates.append((found_exchange, normalized_market, value))
             for key, nested in value.items():
@@ -335,7 +444,9 @@ def _execution_book(
 
     visit(books)
     target_exchange = exchange.lower() if exchange else None
-    target_market = ("perp" if market in {"perp", "perpetual", "swap"} else market) if market else None
+    target_market = (
+        ("perp" if market in {"perp", "perpetual", "swap"} else market) if market else None
+    )
     for candidate_exchange, candidate_market, book in candidates:
         if (target_exchange is None or candidate_exchange == target_exchange) and (
             target_market is None or candidate_market == target_market
@@ -361,7 +472,12 @@ def _levels(raw: object) -> list[tuple[float, float]]:
             price, quantity = level[0], level[1]
         else:
             continue
-        if isinstance(price, (int, float)) and isinstance(quantity, (int, float)) and price > 0 and quantity > 0:
+        if (
+            isinstance(price, (int, float))
+            and isinstance(quantity, (int, float))
+            and price > 0
+            and quantity > 0
+        ):
             result.append((float(price), float(quantity)))
     return result
 

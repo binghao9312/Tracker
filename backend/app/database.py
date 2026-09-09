@@ -77,7 +77,6 @@ class DerivativeMetricRow(Base):
     funding_rate: Mapped[float | None] = mapped_column(Float)
 
 
-
 class PaperTradeRow(Base):
     __tablename__ = "paper_trades"
     __table_args__ = (

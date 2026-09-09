@@ -1,7 +1,23 @@
 import { useEffect, useMemo, useState } from "react";
 import { MetricChart, type ChartPoint } from "./MetricChart";
 
-type ScannerRow = { symbol: string; market_cap_rank: number; price: number | null; activity_score: number | null; liquidity_fragility: number | null };
+type ScannerRow = {
+  symbol: string;
+  market_cap_rank: number;
+  price: number | null;
+  liquidity_fragility: number | null;
+  activity_score: number | null;
+  buy_pressure_1m: number | null;
+  buy_pressure_5m: number | null;
+  sell_pressure_1m: number | null;
+  sell_pressure_5m: number | null;
+  spot_cvd_5m: number | null;
+  perp_cvd_5m: number | null;
+  oi_change_5m: number | null;
+  funding: number | null;
+  move_type: string | null;
+  cross_exchange_state: string | null;
+};
 type Detail = Record<string, unknown>;
 type SortKey = keyof ScannerRow;
 type PaperTrade = Record<string, unknown> & { id: number; symbol: string; side: string; status: string; opened_at: string; closed_at: string | null; entry_price: number; exit_price: number | null; net_pnl: number | null; return_pct: number | null; max_favorable_excursion_pct: number; max_adverse_excursion_pct: number; exit_reason: string | null };
@@ -11,11 +27,26 @@ const number = (value: number | null | undefined, digits = 2) => value == null ?
 const percent = (value: number | null | undefined) => value == null ? "—" : `${value >= 0 ? "+" : ""}${(value * 100).toFixed(2)}%`;
 const socketUrl = (path: string) => `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${path}`;
 
+type SymbolHistory = { market?: { timestamp: string | number; price: number | null }[] };
+
+const scannerColumns = [
+  "symbol", "market_cap_rank", "price", "liquidity_fragility", "activity_score",
+  "buy_pressure_1m", "buy_pressure_5m", "sell_pressure_1m", "sell_pressure_5m",
+  "spot_cvd_5m", "perp_cvd_5m", "oi_change_5m", "funding", "move_type", "cross_exchange_state",
+] as const satisfies readonly SortKey[];
+
+const marketChartPoints = (history: SymbolHistory): ChartPoint[] => (history.market ?? []).flatMap(({ timestamp, price }) => {
+  const milliseconds = typeof timestamp === "number" ? timestamp : Date.parse(timestamp);
+  return typeof price === "number" && Number.isFinite(price) && Number.isFinite(milliseconds) ? [{ timestamp: milliseconds, price }] : [];
+});
+
+
 export function App() {
   const [mode, setMode] = useState<"SCANNER" | "PAPER">("SCANNER");
   const [rows, setRows] = useState<ScannerRow[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [detail, setDetail] = useState<Detail | null>(null);
+  const [historyPoints, setHistoryPoints] = useState<ChartPoint[]>([]);
   const [sort, setSort] = useState<{ key: SortKey; descending: boolean }>({ key: "activity_score", descending: true });
   const [connection, setConnection] = useState("CONNECTING");
   const [trades, setTrades] = useState<PaperTrade[]>([]);
@@ -42,8 +73,25 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    if (!selected) return;
+    let current = true;
+    setDetail(null);
+    setHistoryPoints([]);
+    void fetch(`/api/symbol/${selected}`).then(response => response.ok ? response.json() as Promise<Detail> : null).then(value => {
+      if (current) setDetail(value);
+    }).catch(() => {
+      if (current) setDetail(null);
+    });
+    void fetch(`/api/symbol/${selected}/history`).then(response => response.ok ? response.json() as Promise<SymbolHistory> : null).then(value => {
+      if (current) setHistoryPoints(value ? marketChartPoints(value) : []);
+    }).catch(() => {
+      if (current) setHistoryPoints([]);
+    });
+    return () => { current = false; };
+  }, [selected]);
+
+  useEffect(() => {
     if (!selected || mode !== "SCANNER") return;
-    void fetch(`/api/symbol/${selected}`).then(response => response.ok ? response.json() : null).then(setDetail);
     const socket = new WebSocket(socketUrl(`/ws/symbol/${selected}`));
     socket.onmessage = ({ data }) => { const message = JSON.parse(data) as { type: string; data: Detail }; if (message.type === "symbol") setDetail(message.data); };
     return () => socket.close();
@@ -73,7 +121,7 @@ export function App() {
 
   return <main className="terminal">
     <header className="toolbar"><strong>QTRADE / CEX LIQUIDITY & FLOW</strong><nav><button className={mode === "SCANNER" ? "active" : ""} onClick={() => setMode("SCANNER")}>SCANNER</button><button className={mode === "PAPER" ? "active" : ""} onClick={() => setMode("PAPER")}>PAPER</button></nav><span>BINANCE <i className="online"/> OKX <i className="online"/></span><span className="connection">{connection}</span></header>
-    {mode === "SCANNER" ? <><section className="scanner"><table><thead><tr>{(["symbol", "market_cap_rank", "price", "liquidity_fragility", "activity_score"] as SortKey[]).map(key => <th key={key} onClick={() => chooseSort(key)}>{key.replaceAll("_", " ")}{sort.key === key ? sort.descending ? " ↓" : " ↑" : ""}</th>)}</tr></thead><tbody>{ordered.map(row => <tr key={row.symbol} className={row.symbol === selected ? "selected" : ""} onClick={() => setSelected(row.symbol)}><td>{row.symbol}</td><td>{row.market_cap_rank}</td><td>{number(row.price)}</td><td>{number(row.liquidity_fragility)}</td><td>{number(row.activity_score)}</td></tr>)}</tbody></table></section><section className="detail"><div><h2>{selected ?? "SELECT SYMBOL"}</h2>{detail ? <dl>{Object.entries(detail).filter(([, value]) => typeof value !== "object").map(([key, value]) => <div key={key}><dt>{key.replaceAll("_", " ")}</dt><dd>{typeof value === "number" ? number(value, 4) : String(value)}</dd></div>)}</dl> : <p>Choose a scanner row for exchange-normalized liquidity, flow, and derivatives metrics.</p>}</div><MetricChart data={Array.isArray(detail?.history) ? detail.history as ChartPoint[] : []}/></section></> : <PaperPage stats={stats} positions={positions} trades={trades} replay={replay} currentPrices={currentPrices} onReplay={loadReplay} onCloseReplay={() => setReplay(null)}/>}
+    {mode === "SCANNER" ? <><section className="scanner"><table><thead><tr>{scannerColumns.map(key => <th key={key} onClick={() => chooseSort(key)}>{key.replaceAll("_", " ")}{sort.key === key ? sort.descending ? " ↓" : " ↑" : ""}</th>)}</tr></thead><tbody>{ordered.map(row => <tr key={row.symbol} className={row.symbol === selected ? "selected" : ""} onClick={() => setSelected(row.symbol)}>{scannerColumns.map(key => <td key={key}>{typeof row[key] === "number" ? number(row[key], 4) : row[key] ?? "—"}</td>)}</tr>)}</tbody></table></section><section className="detail"><div><h2>{selected ?? "SELECT SYMBOL"}</h2>{detail ? <dl>{Object.entries(detail).filter(([, value]) => typeof value !== "object").map(([key, value]) => <div key={key}><dt>{key.replaceAll("_", " ")}</dt><dd>{typeof value === "number" ? number(value, 4) : String(value)}</dd></div>)}</dl> : <p>Choose a scanner row for exchange-normalized liquidity, flow, and derivatives metrics.</p>}</div><MetricChart data={historyPoints}/></section></> : <PaperPage stats={stats} positions={positions} trades={trades} replay={replay} currentPrices={currentPrices} onReplay={loadReplay} onCloseReplay={() => setReplay(null)}/>}
   </main>;
 }
 

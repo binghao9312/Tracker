@@ -86,7 +86,11 @@ def _require_perpetual(instrument: MarketInstrument, exchange: Exchange) -> None
 
 
 def _okx_single_record(payload: object) -> dict[str, object]:
-    if not isinstance(payload, dict) or payload.get("code") != "0" or not isinstance(payload.get("data"), list):
+    if (
+        not isinstance(payload, dict)
+        or payload.get("code") != "0"
+        or not isinstance(payload.get("data"), list)
+    ):
         raise ValueError("OKX derivative response is invalid")
     records = [record for record in payload["data"] if isinstance(record, dict)]
     if len(records) != 1:

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+from decimal import Decimal, InvalidOperation
 
 from app.exchanges.base import ExchangeAdapter
 from app.http import JsonHttpClient
 from app.models import Exchange, MarketInstrument, MarketType
+from app.orderbook import SequencedOrderBookSnapshot
 from app.symbols import normalize_okx_instrument
 
 SPOT_INSTRUMENTS_URL = "https://www.okx.com/api/v5/public/instruments?instType=SPOT"
@@ -96,9 +98,8 @@ class OkxAdapter(ExchangeAdapter):
 
     async def fetch_order_book_snapshot(
         self, instrument: MarketInstrument
-    ) -> "SequencedOrderBookSnapshot":
+    ) -> SequencedOrderBookSnapshot:
         """Fetch the REST baseline required before applying books-channel updates."""
-        from app.orderbook import SequencedOrderBookSnapshot
 
         if instrument.exchange is not self.exchange:
             raise ValueError("instrument does not belong to OKX")
@@ -114,28 +115,38 @@ class OkxAdapter(ExchangeAdapter):
             timestamp = int(record["ts"])
         except (KeyError, TypeError, ValueError) as error:
             raise ValueError("OKX depth snapshot has invalid sequencing") from error
+        quantity_multiplier = (
+            instrument.base_quantity_multiplier if instrument.market is MarketType.PERP else 1.0
+        )
         return SequencedOrderBookSnapshot(
             exchange=self.exchange,
             symbol=instrument.symbol,
             market=instrument.market,
             sequence=sequence,
             timestamp=timestamp,
-            bids=self._parse_depth_levels(record.get("bids")),
-            asks=self._parse_depth_levels(record.get("asks")),
+            bids=self._parse_depth_levels(
+                record.get("bids"), quantity_multiplier=quantity_multiplier
+            ),
+            asks=self._parse_depth_levels(
+                record.get("asks"), quantity_multiplier=quantity_multiplier
+            ),
         )
 
     @staticmethod
-    def _parse_depth_levels(raw_levels: object) -> list[tuple["Decimal", "Decimal"]]:
-        from decimal import Decimal, InvalidOperation
+    def _parse_depth_levels(
+        raw_levels: object, *, quantity_multiplier: float = 1.0
+    ) -> list[tuple[Decimal, Decimal]]:
 
         if not isinstance(raw_levels, list):
             raise ValueError("OKX depth snapshot has no price levels")
+        multiplier = Decimal(str(quantity_multiplier))
         levels: list[tuple[Decimal, Decimal]] = []
         for level in raw_levels:
             if not isinstance(level, list) or len(level) < 2:
                 raise ValueError("OKX depth level is invalid")
             try:
-                price, quantity = Decimal(str(level[0])), Decimal(str(level[1]))
+                price = Decimal(str(level[0]))
+                quantity = Decimal(str(level[1])) * multiplier
             except InvalidOperation as error:
                 raise ValueError("OKX depth level is not numeric") from error
             levels.append((price, quantity))

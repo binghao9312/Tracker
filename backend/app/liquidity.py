@@ -52,24 +52,48 @@ def calculate_liquidity(order_book: OrderBook) -> LiquidityMetrics:
         ask_depth_2=float(ask_depth_2),
         bid_depth_5=float(depths[3][0]),
         ask_depth_5=float(depths[3][1]),
-        buy_impacts={notional: _market_impact(asks, mid, Decimal(notional), is_buy=True) for notional in IMPACT_NOTIONALS},
-        sell_impacts={notional: _market_impact(bids, mid, Decimal(notional), is_buy=False) for notional in IMPACT_NOTIONALS},
-        capital_to_move_up={percent: _capital_to_reach(asks, mid * (1 + Decimal(percent) / 100), is_buy=True) for percent in (1, 2, 5)},
-        capital_to_move_down={percent: _capital_to_reach(bids, mid * (1 - Decimal(percent) / 100), is_buy=False) for percent in (1, 2, 5)},
+        buy_impacts={
+            notional: _market_impact(asks, mid, Decimal(notional), is_buy=True)
+            for notional in IMPACT_NOTIONALS
+        },
+        sell_impacts={
+            notional: _market_impact(bids, mid, Decimal(notional), is_buy=False)
+            for notional in IMPACT_NOTIONALS
+        },
+        capital_to_move_up={
+            percent: _capital_to_reach(asks, mid * (1 + Decimal(percent) / 100), is_buy=True)
+            for percent in (1, 2, 5)
+        },
+        capital_to_move_down={
+            percent: _capital_to_reach(bids, mid * (1 - Decimal(percent) / 100), is_buy=False)
+            for percent in (1, 2, 5)
+        },
         order_book_imbalance=float(imbalance),
     )
 
 
-def _sorted_levels(levels: list[PriceLevel], reverse: bool = False) -> list[tuple[Decimal, Decimal]]:
-    return sorted(((Decimal(str(level.price)), Decimal(str(level.quantity))) for level in levels), reverse=reverse)
+def _sorted_levels(
+    levels: list[PriceLevel], reverse: bool = False
+) -> list[tuple[Decimal, Decimal]]:
+    return sorted(
+        ((Decimal(str(level.price)), Decimal(str(level.quantity))) for level in levels),
+        reverse=reverse,
+    )
 
 
 def _depth_at_band(
-    bids: list[tuple[Decimal, Decimal]], asks: list[tuple[Decimal, Decimal]], mid: Decimal, band: Decimal
+    bids: list[tuple[Decimal, Decimal]],
+    asks: list[tuple[Decimal, Decimal]],
+    mid: Decimal,
+    band: Decimal,
 ) -> tuple[Decimal, Decimal]:
     bid_floor, ask_ceiling = mid * (1 - band), mid * (1 + band)
-    bid_depth = sum((price * quantity for price, quantity in bids if price >= bid_floor), Decimal(0))
-    ask_depth = sum((price * quantity for price, quantity in asks if price <= ask_ceiling), Decimal(0))
+    bid_depth = sum(
+        (price * quantity for price, quantity in bids if price >= bid_floor), Decimal(0)
+    )
+    ask_depth = sum(
+        (price * quantity for price, quantity in asks if price <= ask_ceiling), Decimal(0)
+    )
     return bid_depth, ask_depth
 
 

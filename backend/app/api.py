@@ -22,8 +22,32 @@ class ScannerRow(BaseModel):
     symbol: str
     market_cap_rank: int
     price: float | None = None
-    activity_score: float | None = None
     liquidity_fragility: float | None = None
+    activity_score: float | None = None
+    buy_pressure_1m: float | None = None
+    buy_pressure_5m: float | None = None
+    sell_pressure_1m: float | None = None
+    sell_pressure_5m: float | None = None
+    spot_cvd_5m: float | None = None
+    perp_cvd_5m: float | None = None
+    oi_change_5m: float | None = None
+    funding: float | None = None
+    move_type: str | None = None
+    cross_exchange_state: str | None = None
+
+
+def _market_metric(detail: dict[str, Any], market: str, metric: str) -> float | None:
+    value = detail[market].get(metric)
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def _strongest_pressure(detail: dict[str, Any], metric: str) -> float | None:
+    values = (
+        value
+        for market in ("spot", "perp")
+        if (value := _market_metric(detail, market, metric)) is not None
+    )
+    return max(values, default=None)
 
 
 class DashboardDetail(BaseModel):
@@ -37,6 +61,11 @@ class DashboardDetail(BaseModel):
     move_type: str | None = None
     cross_exchange_state: str | None = None
     oi_change_5m: float | None = None
+    oi_change_15m: float | None = None
+    oi_change_1h: float | None = None
+    oi_change_by_exchange: dict[str, dict[str, float | None]] = Field(default_factory=dict)
+    move_type_by_exchange: dict[str, str] = Field(default_factory=dict)
+    exchange_directions: dict[str, str] = Field(default_factory=dict)
     funding: float | None = None
     buy_pressure_1m: float | None = None
     buy_pressure_5m: float | None = None
@@ -72,11 +101,23 @@ class DashboardState:
                 symbol=symbol,
                 market_cap_rank=self._rank_by_symbol[symbol],
                 price=canonical["price"],
-                activity_score=canonical["activity_score"],
                 liquidity_fragility=canonical["liquidity_fragility"],
+                activity_score=canonical["activity_score"],
+                buy_pressure_1m=_strongest_pressure(canonical, "buy_pressure_1m"),
+                buy_pressure_5m=_strongest_pressure(canonical, "buy_pressure_5m"),
+                sell_pressure_1m=_strongest_pressure(canonical, "sell_pressure_1m"),
+                sell_pressure_5m=_strongest_pressure(canonical, "sell_pressure_5m"),
+                spot_cvd_5m=_market_metric(canonical, "spot", "cvd_5m"),
+                perp_cvd_5m=_market_metric(canonical, "perp", "cvd_5m"),
+                oi_change_5m=canonical["oi_change_5m"],
+                funding=canonical["funding"],
+                move_type=canonical["move_type"],
+                cross_exchange_state=canonical["cross_exchange_state"],
             )
             self._rows[symbol] = row
-        paper_events = await self.paper_engine.process_update(symbol, canonical) if self.paper_engine else []
+        paper_events = (
+            await self.paper_engine.process_update(symbol, canonical) if self.paper_engine else []
+        )
         await self._broadcast("scanner", {"type": "scanner", "data": row.model_dump()})
         await self._broadcast(f"symbol:{symbol}", {"type": "symbol", "data": canonical})
         for event in paper_events:
@@ -194,7 +235,9 @@ def create_app(
     async def scanner_socket(websocket: WebSocket) -> None:
         await websocket.accept()
         try:
-            await websocket.send_json({"type": "scanner", "data": [row.model_dump() for row in state.scanner()]})
+            await websocket.send_json(
+                {"type": "scanner", "data": [row.model_dump() for row in state.scanner()]}
+            )
             async for message in state.subscribe("scanner"):
                 await websocket.send_json(message)
         except WebSocketDisconnect:
@@ -226,10 +269,10 @@ def create_app(
     return app
 
 
-
 def _timestamp(value: object) -> datetime:
     if isinstance(value, datetime):
         return value
     return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+
 
 app = create_app()

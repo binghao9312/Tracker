@@ -28,8 +28,10 @@ def normalize_okx_instrument(instrument_id: str, market: MarketType) -> str:
     parts = instrument_id.upper().split("-")
     expected_parts = 2 if market is MarketType.SPOT else 3
     expected_suffix = None if market is MarketType.SPOT else "SWAP"
-    if len(parts) != expected_parts or parts[1] != USDT or (
-        expected_suffix is not None and parts[2] != expected_suffix
+    if (
+        len(parts) != expected_parts
+        or parts[1] != USDT
+        or (expected_suffix is not None and parts[2] != expected_suffix)
     ):
         raise ValueError(f"invalid OKX {market.value} USDT instrument: {instrument_id}")
     return normalized_symbol(parts[0])

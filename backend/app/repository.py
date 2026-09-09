@@ -5,9 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
-from typing import Any
-
 from math import isfinite
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -71,6 +70,7 @@ class MetricRepository:
         market: str | None = None,
     ) -> dict[str, list[dict[str, Any]]]:
         async with self._sessions() as session:
+
             async def rows(
                 row_type: type[MarketMetricRow] | type[FlowMetricRow] | type[DerivativeMetricRow],
                 *,
@@ -85,7 +85,9 @@ class MetricRepository:
                     conditions.append(row_type.exchange == exchange)
                 if filter_market and market is not None:
                     conditions.append(row_type.market == market)
-                result = await session.scalars(select(row_type).where(*conditions).order_by(row_type.timestamp))
+                result = await session.scalars(
+                    select(row_type).where(*conditions).order_by(row_type.timestamp)
+                )
                 return [_history_row_dict(row) for row in result.all()]
 
             return {
@@ -97,7 +99,6 @@ class MetricRepository:
     async def _append(self, row: MarketMetricRow | FlowMetricRow | DerivativeMetricRow) -> None:
         async with self._sessions.begin() as session:
             session.add(row)
-
 
 
 class DuplicateOpenTrade(ValueError):
@@ -147,6 +148,7 @@ class PaperTradeRepository:
                 )
             )
             return _row_dict(row) if row is not None else None
+
     async def get_recent_closed_positions(self, since: datetime) -> list[dict[str, Any]]:
         async with self._sessions() as session:
             rows = await session.scalars(
@@ -172,9 +174,13 @@ class PaperTradeRepository:
             if result == "open":
                 statement = statement.where(PaperTradeRow.status == "OPEN")
             elif result == "win":
-                statement = statement.where(PaperTradeRow.status == "CLOSED", PaperTradeRow.net_pnl > 0)
+                statement = statement.where(
+                    PaperTradeRow.status == "CLOSED", PaperTradeRow.net_pnl > 0
+                )
             elif result == "loss":
-                statement = statement.where(PaperTradeRow.status == "CLOSED", PaperTradeRow.net_pnl < 0)
+                statement = statement.where(
+                    PaperTradeRow.status == "CLOSED", PaperTradeRow.net_pnl < 0
+                )
             rows = await session.scalars(statement)
             return [_row_dict(row) for row in rows.all()]
 
@@ -229,13 +235,24 @@ class PaperTradeRepository:
             "average_mfe": _average(closed, "max_favorable_excursion_pct"),
             "average_mae": _average(closed, "max_adverse_excursion_pct"),
             "breakdowns": {
-                "activity_score": _buckets(closed, "entry_activity_score", [(80, 85), (85, 90), (90, 95), (95, 100)]),
-                "liquidity_fragility": _buckets(closed, "entry_liquidity_fragility", [(0, 25), (25, 50), (50, 75), (75, 100)]),
+                "activity_score": _buckets(
+                    closed, "entry_activity_score", [(80, 85), (85, 90), (90, 95), (95, 100)]
+                ),
+                "liquidity_fragility": _buckets(
+                    closed, "entry_liquidity_fragility", [(0, 25), (25, 50), (50, 75), (75, 100)]
+                ),
                 "direction": _groups(closed, "side", ["LONG", "SHORT"]),
-                "move_type": _groups(closed, "entry_move_type", ["SPOT_DRIVEN", "LEVERAGE_DRIVEN", "MIXED"]),
-                "cross_exchange": _groups(closed, "entry_cross_exchange_state", ["CONFIRMED", "DIVERGENT", "SINGLE_EXCHANGE"]),
+                "move_type": _groups(
+                    closed, "entry_move_type", ["SPOT_DRIVEN", "LEVERAGE_DRIVEN", "MIXED"]
+                ),
+                "cross_exchange": _groups(
+                    closed,
+                    "entry_cross_exchange_state",
+                    ["CONFIRMED", "DIVERGENT", "SINGLE_EXCHANGE"],
+                ),
             },
         }
+
 
 def _average(rows: list[dict[str, Any]], key: str) -> float:
     values = [_finite_number(row[key]) for row in rows if row.get(key) is not None]
@@ -273,9 +290,7 @@ def _buckets(
     }
 
 
-def _groups(
-    rows: list[dict[str, Any]], key: str, values: list[str]
-) -> dict[str, dict[str, Any]]:
+def _groups(rows: list[dict[str, Any]], key: str, values: list[str]) -> dict[str, dict[str, Any]]:
     return {value: _summary([row for row in rows if row.get(key) == value]) for value in values}
 
 
@@ -313,6 +328,6 @@ def _row_dict(
 
 def _history_row_dict(row: MarketMetricRow | FlowMetricRow | DerivativeMetricRow) -> dict[str, Any]:
     result = _row_dict(row)
-    timestamp = getattr(row, "timestamp")
+    timestamp = row.timestamp
     result["timestamp"] = int(timestamp.timestamp() * 1_000)
     return result

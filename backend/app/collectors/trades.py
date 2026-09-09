@@ -1,24 +1,38 @@
-"""Reconnectable normalized aggressive-trade collectors."""
+"""Reconnectable normalized aggressive-trade stream managers."""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
-from collections.abc import Awaitable, Callable
-from time import time_ns
+from collections.abc import Awaitable, Callable, Iterable
 
 import aiohttp
 
-from app.models import MarketInstrument, NormalizedTrade
+from app.models import MarketInstrument, MarketType, NormalizedTrade
 
 logger = logging.getLogger(__name__)
 TradeCallback = Callable[[NormalizedTrade], Awaitable[None]]
 
 
-class _TradeCollector:
-    def __init__(self, session: aiohttp.ClientSession, on_trade: TradeCallback) -> None:
+class _TradeManager:
+    def __init__(
+        self,
+        session: aiohttp.ClientSession,
+        market: MarketType,
+        instruments: Iterable[MarketInstrument],
+        on_trade: TradeCallback,
+    ) -> None:
         self._session = session
+        self._market = market
+        listed = tuple(instruments)
+        self._instruments = {instrument.exchange_symbol: instrument for instrument in listed}
+        if not self._instruments:
+            raise ValueError("trade manager requires at least one instrument")
+        if len(self._instruments) != len(listed):
+            raise ValueError("trade manager has duplicate exchange symbols")
+        if any(instrument.market is not market for instrument in self._instruments.values()):
+            raise ValueError("trade manager instruments must share a market")
         self._on_trade = on_trade
 
     async def run(self, stop: asyncio.Event) -> None:
@@ -31,75 +45,114 @@ class _TradeCollector:
                 raise
             except (aiohttp.ClientError, OSError, ValueError, KeyError) as error:
                 logger.warning(
-                    "trade_collector_reconnect",
-                    extra={"collector": type(self).__name__, "error": str(error)},
+                    "trade_manager_reconnect",
+                    extra={"manager": type(self).__name__, "error": str(error)},
                 )
-                try:
-                    await asyncio.wait_for(stop.wait(), timeout=delay)
-                except TimeoutError:
-                    pass
+                await self._sleep_or_stop(stop, delay)
                 delay = min(delay * 2, 30.0)
+
+    @staticmethod
+    async def _sleep_or_stop(stop: asyncio.Event, delay: float) -> None:
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=delay)
+        except TimeoutError:
+            pass
 
     async def _stream(self, stop: asyncio.Event) -> None:
         raise NotImplementedError
 
-
-class BinanceTradeCollector(_TradeCollector):
-    def __init__(
-        self,
-        session: aiohttp.ClientSession,
-        instrument: MarketInstrument,
-        on_trade: TradeCallback,
+    async def _publish_binance_trade(
+        self, instrument: MarketInstrument, data: dict[str, object]
     ) -> None:
-        super().__init__(session, on_trade)
-        self._instrument = instrument
+        price = float(data["p"])
+        quantity = float(data["q"]) * instrument.base_quantity_multiplier
+        await self._on_trade(
+            NormalizedTrade(
+                exchange=instrument.exchange,
+                symbol=instrument.symbol,
+                market=instrument.market,
+                timestamp=int(data["T"]),
+                price=price,
+                quantity=quantity,
+                quote_value=price * quantity,
+                side="SELL" if data["m"] else "BUY",
+            )
+        )
+
+    async def _publish_okx_trade(
+        self, instrument: MarketInstrument, record: dict[str, object]
+    ) -> None:
+        side = record.get("side")
+        if side not in {"buy", "sell"}:
+            raise ValueError("OKX trade message is invalid")
+        price = float(record["px"])
+        quantity = float(record["sz"]) * instrument.base_quantity_multiplier
+        await self._on_trade(
+            NormalizedTrade(
+                exchange=instrument.exchange,
+                symbol=instrument.symbol,
+                market=instrument.market,
+                timestamp=int(record["ts"]),
+                price=price,
+                quantity=quantity,
+                quote_value=price * quantity,
+                side=side.upper(),
+            )
+        )
+
+
+class BinanceTradeManager(_TradeManager):
+    """Route a market's Binance aggregate trades over one combined stream."""
 
     async def _stream(self, stop: asyncio.Event) -> None:
-        host = "stream.binance.com:9443" if self._instrument.market.value == "spot" else "fstream.binance.com"
-        stream = f"{self._instrument.exchange_symbol.lower()}@aggTrade"
-        async with self._session.ws_connect(f"wss://{host}/ws/{stream}", heartbeat=20) as websocket:
+        host = (
+            "stream.binance.com:9443" if self._market is MarketType.SPOT else "fstream.binance.com"
+        )
+        streams = "/".join(
+            f"{instrument.exchange_symbol.lower()}@aggTrade"
+            for instrument in self._instruments.values()
+        )
+        async with self._session.ws_connect(
+            f"wss://{host}/stream?streams={streams}", heartbeat=20
+        ) as websocket:
             async for message in websocket:
                 if stop.is_set():
                     return
                 if message.type is aiohttp.WSMsgType.ERROR:
-                    raise websocket.exception() or ConnectionError("Binance trades WebSocket closed")
+                    raise websocket.exception() or ConnectionError(
+                        "Binance trades WebSocket closed"
+                    )
                 if message.type is not aiohttp.WSMsgType.TEXT:
                     continue
-                data = _object(message.data)
-                if data.get("e") != "aggTrade":
+                envelope = _object(message.data)
+                data = envelope.get("data")
+                if not isinstance(data, dict) or data.get("e") != "aggTrade":
                     continue
-                price = float(data["p"])
-                quantity = float(data["q"]) * self._instrument.base_quantity_multiplier
-                await self._on_trade(
-                    NormalizedTrade(
-                        exchange=self._instrument.exchange,
-                        symbol=self._instrument.symbol,
-                        market=self._instrument.market,
-                        timestamp=int(data["T"]),
-                        price=price,
-                        quantity=quantity,
-                        quote_value=price * quantity,
-                        side="SELL" if data["m"] else "BUY",
-                    )
-                )
+                exchange_symbol = data.get("s")
+                if not isinstance(exchange_symbol, str):
+                    raise ValueError("Binance trade has no symbol")
+                instrument = self._instruments.get(exchange_symbol)
+                if instrument is not None:
+                    await self._publish_binance_trade(instrument, data)
         if not stop.is_set():
             raise ConnectionError("Binance trades WebSocket disconnected")
 
 
-class OkxTradeCollector(_TradeCollector):
-    def __init__(
-        self,
-        session: aiohttp.ClientSession,
-        instrument: MarketInstrument,
-        on_trade: TradeCallback,
-    ) -> None:
-        super().__init__(session, on_trade)
-        self._instrument = instrument
+class OkxTradeManager(_TradeManager):
+    """Route a market's OKX trades over one multi-instrument subscription."""
 
     async def _stream(self, stop: asyncio.Event) -> None:
-        async with self._session.ws_connect("wss://ws.okx.com:8443/ws/v5/public", heartbeat=20) as websocket:
+        async with self._session.ws_connect(
+            "wss://ws.okx.com:8443/ws/v5/public", heartbeat=20
+        ) as websocket:
             await websocket.send_json(
-                {"op": "subscribe", "args": [{"channel": "trades", "instId": self._instrument.exchange_symbol}]}
+                {
+                    "op": "subscribe",
+                    "args": [
+                        {"channel": "trades", "instId": instrument.exchange_symbol}
+                        for instrument in self._instruments.values()
+                    ],
+                }
             )
             async for message in websocket:
                 if stop.is_set():
@@ -113,25 +166,18 @@ class OkxTradeCollector(_TradeCollector):
                 records = event.get("data")
                 if not isinstance(argument, dict) or argument.get("channel") != "trades":
                     continue
+                exchange_symbol = argument.get("instId")
+                if not isinstance(exchange_symbol, str):
+                    raise ValueError("OKX trade has no instrument")
+                instrument = self._instruments.get(exchange_symbol)
+                if instrument is None:
+                    continue
                 if not isinstance(records, list):
                     raise ValueError("OKX trade message has invalid data")
                 for record in records:
-                    if not isinstance(record, dict) or record.get("side") not in {"buy", "sell"}:
+                    if not isinstance(record, dict):
                         raise ValueError("OKX trade message is invalid")
-                    price = float(record["px"])
-                    quantity = float(record["sz"]) * self._instrument.base_quantity_multiplier
-                    await self._on_trade(
-                        NormalizedTrade(
-                            exchange=self._instrument.exchange,
-                            symbol=self._instrument.symbol,
-                            market=self._instrument.market,
-                            timestamp=int(record["ts"]),
-                            price=price,
-                            quantity=quantity,
-                            quote_value=price * quantity,
-                            side=record["side"].upper(),
-                        )
-                    )
+                    await self._publish_okx_trade(instrument, record)
         if not stop.is_set():
             raise ConnectionError("OKX trades WebSocket disconnected")
 

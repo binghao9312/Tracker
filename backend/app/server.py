@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import os
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
 
 from fastapi import FastAPI
 
@@ -14,6 +14,8 @@ from app.database import build_engine, create_schema, session_factory
 from app.paper_trading import PaperTradingEngine, load_paper_trading_settings
 from app.repository import MetricRepository, PaperTradeRepository
 from app.runtime import LiveRuntime
+from app.scoring import load_classification_thresholds
+from app.trade_signal import load_trade_signal_thresholds
 
 _database_url = os.environ.get("DATABASE_URL")
 if not _database_url:
@@ -23,7 +25,14 @@ _engine = build_engine(_database_url)
 _sessions = session_factory(_engine)
 _repository = MetricRepository(_sessions)
 _paper_repository = PaperTradeRepository(_sessions)
-_paper_engine = PaperTradingEngine(_paper_repository, load_paper_trading_settings(scoring_path()))
+_scoring_config_path = scoring_path()
+_classification_thresholds = load_classification_thresholds(_scoring_config_path)
+_trade_signal_thresholds = load_trade_signal_thresholds(_scoring_config_path)
+_paper_engine = PaperTradingEngine(
+    _paper_repository,
+    load_paper_trading_settings(_scoring_config_path),
+    _trade_signal_thresholds,
+)
 _runtime: LiveRuntime | None = None
 
 
@@ -32,7 +41,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     global _runtime
     await create_schema(_engine)
     await _paper_engine.recover_open_positions()
-    _runtime = LiveRuntime(app.state.dashboard, _repository)
+    _runtime = LiveRuntime(app.state.dashboard, _repository, thresholds=_classification_thresholds)
     await _runtime.start()
     try:
         yield
@@ -41,6 +50,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await _runtime.stop()
             _runtime = None
         await _engine.dispose()
+
 
 app = create_app(
     history_repository=_repository,

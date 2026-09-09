@@ -16,7 +16,12 @@ class PaperRearmTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_closed_trade_honors_cooldown(self) -> None:
         repository = MemoryPaperRepository()
-        engine = PaperTradingEngine(repository, PaperTradingSettings(signal_persistence_seconds=0, take_profit_pct=0.01, cooldown_minutes=15))
+        engine = PaperTradingEngine(
+            repository,
+            PaperTradingSettings(
+                signal_persistence_seconds=0, take_profit_pct=0.01, cooldown_minutes=15
+            ),
+        )
         now = datetime(2025, 1, 1, tzinfo=UTC)
         await engine.process_update("BTCUSDT", detail(), now)
         await engine.process_update("BTCUSDT", detail(price=103), now + timedelta(seconds=1))

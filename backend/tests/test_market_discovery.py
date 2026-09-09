@@ -6,9 +6,7 @@ from app.models import Exchange, MarketInstrument, MarketType, UniverseAsset
 
 
 class StaticAdapter(ExchangeAdapter):
-    def __init__(
-        self, exchange: Exchange, markets: list[MarketInstrument] | Exception
-    ) -> None:
+    def __init__(self, exchange: Exchange, markets: list[MarketInstrument] | Exception) -> None:
         self.exchange = exchange
         self._markets = markets
 

@@ -29,4 +29,6 @@ class DuplicateOpenRepositoryTests(unittest.IsolatedAsyncioTestCase):
     async def test_open_trade_rejects_durable_duplicate_open_position(self) -> None:
         repository = PaperTradeRepository(FailingSessions())
         with self.assertRaises(DuplicateOpenTrade):
-            await repository.open_trade({"symbol": "BTCUSDT", "opened_at": datetime(2025, 1, 1, tzinfo=UTC)})
+            await repository.open_trade(
+                {"symbol": "BTCUSDT", "opened_at": datetime(2025, 1, 1, tzinfo=UTC)}
+            )

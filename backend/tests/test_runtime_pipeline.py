@@ -40,14 +40,28 @@ class RuntimePipelineTests(unittest.IsolatedAsyncioTestCase):
         metrics = MemoryMetrics()
         runtime = LiveRuntime(state, metrics)
         now_ms = time_ns() // 1_000_000
-        await runtime.on_order_book(OrderBook(
-            exchange=Exchange.BINANCE, symbol="BTCUSDT", market=MarketType.PERP, timestamp=now_ms,
-            bids=[PriceLevel(price=99, quantity=100)], asks=[PriceLevel(price=101, quantity=100)],
-        ))
-        await runtime.on_trade(NormalizedTrade(
-            exchange=Exchange.BINANCE, symbol="BTCUSDT", market=MarketType.PERP, timestamp=now_ms,
-            price=101, quantity=500, quote_value=50_500, side="BUY",
-        ))
+        await runtime.on_order_book(
+            OrderBook(
+                exchange=Exchange.BINANCE,
+                symbol="BTCUSDT",
+                market=MarketType.PERP,
+                timestamp=now_ms,
+                bids=[PriceLevel(price=99, quantity=100)],
+                asks=[PriceLevel(price=101, quantity=100)],
+            )
+        )
+        await runtime.on_trade(
+            NormalizedTrade(
+                exchange=Exchange.BINANCE,
+                symbol="BTCUSDT",
+                market=MarketType.PERP,
+                timestamp=now_ms,
+                price=101,
+                quantity=500,
+                quote_value=50_500,
+                side="BUY",
+            )
+        )
 
         await runtime.flush()
 

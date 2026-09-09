@@ -6,7 +6,9 @@ from app.universe import JsonMarketUniverseProvider
 
 class UniverseProviderTests(unittest.TestCase):
     def test_loads_ranked_top_fifty_with_bitcoin(self) -> None:
-        provider = JsonMarketUniverseProvider(Path(__file__).parents[2] / "config" / "universe.json")
+        provider = JsonMarketUniverseProvider(
+            Path(__file__).parents[2] / "config" / "universe.json"
+        )
 
         universe = provider.load()
 

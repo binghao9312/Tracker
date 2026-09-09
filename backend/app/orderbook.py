@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Iterable
 
 from app.models import Exchange, MarketType, OrderBook, PriceLevel
 
@@ -111,8 +111,14 @@ class LocalOrderBook:
             symbol=snapshot.symbol,
             market=snapshot.market,
             timestamp=timestamp,
-            bids=[PriceLevel(price=float(price), quantity=float(quantity)) for price, quantity in self.bids],
-            asks=[PriceLevel(price=float(price), quantity=float(quantity)) for price, quantity in self.asks],
+            bids=[
+                PriceLevel(price=float(price), quantity=float(quantity))
+                for price, quantity in self.bids
+            ],
+            asks=[
+                PriceLevel(price=float(price), quantity=float(quantity))
+                for price, quantity in self.asks
+            ],
         )
 
     @property

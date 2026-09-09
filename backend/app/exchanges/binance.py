@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+from decimal import Decimal, InvalidOperation
 from time import time_ns
-
 
 from app.exchanges.base import ExchangeAdapter
 from app.http import JsonHttpClient
 from app.models import Exchange, MarketInstrument, MarketType
+from app.orderbook import SequencedOrderBookSnapshot
 from app.symbols import normalized_symbol
 
 SPOT_EXCHANGE_INFO_URL = "https://api.binance.com/api/v3/exchangeInfo"
@@ -93,9 +94,8 @@ class BinanceAdapter(ExchangeAdapter):
 
     async def fetch_order_book_snapshot(
         self, instrument: MarketInstrument
-    ) -> "SequencedOrderBookSnapshot":
+    ) -> SequencedOrderBookSnapshot:
         """Fetch the REST baseline required before applying depth events."""
-        from app.orderbook import SequencedOrderBookSnapshot
 
         if instrument.exchange is not self.exchange:
             raise ValueError("instrument does not belong to Binance")
@@ -120,8 +120,7 @@ class BinanceAdapter(ExchangeAdapter):
         )
 
     @staticmethod
-    def _parse_depth_levels(raw_levels: object) -> list[tuple["Decimal", "Decimal"]]:
-        from decimal import Decimal, InvalidOperation
+    def _parse_depth_levels(raw_levels: object) -> list[tuple[Decimal, Decimal]]:
 
         if not isinstance(raw_levels, list):
             raise ValueError("Binance depth snapshot has no price levels")

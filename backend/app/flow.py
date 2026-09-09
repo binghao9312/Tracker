@@ -24,11 +24,9 @@ class RollingTradeFlow:
 
     def __init__(self) -> None:
         self._trades: deque[NormalizedTrade] = deque()
-        self._cvd = 0.0
 
     def add_trade(self, trade: NormalizedTrade) -> None:
         self._trades.append(trade)
-        self._cvd += trade.quote_value if trade.side == "BUY" else -trade.quote_value
         self.prune(trade.timestamp)
 
     def prune(self, timestamp_ms: int) -> None:
@@ -38,18 +36,28 @@ class RollingTradeFlow:
 
     def windows(self, timestamp_ms: int) -> dict[int, FlowWindow]:
         self.prune(timestamp_ms)
-        return {seconds: self._window(timestamp_ms - seconds * 1_000) for seconds in WINDOWS_SECONDS}
+        return {
+            seconds: self._window(timestamp_ms - seconds * 1_000) for seconds in WINDOWS_SECONDS
+        }
 
     def _window(self, cutoff: int) -> FlowWindow:
-        buy_volume = sum(trade.quote_value for trade in self._trades if trade.timestamp >= cutoff and trade.side == "BUY")
-        sell_volume = sum(trade.quote_value for trade in self._trades if trade.timestamp >= cutoff and trade.side == "SELL")
+        buy_volume = sum(
+            trade.quote_value
+            for trade in self._trades
+            if trade.timestamp >= cutoff and trade.side == "BUY"
+        )
+        sell_volume = sum(
+            trade.quote_value
+            for trade in self._trades
+            if trade.timestamp >= cutoff and trade.side == "SELL"
+        )
         delta = buy_volume - sell_volume
         return FlowWindow(
             buy_volume=buy_volume,
             sell_volume=sell_volume,
             delta=delta,
             buy_sell_ratio=None if sell_volume == 0 else buy_volume / sell_volume,
-            cvd=self._cvd,
+            cvd=delta,
         )
 
 

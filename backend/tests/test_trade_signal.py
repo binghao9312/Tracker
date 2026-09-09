@@ -12,7 +12,12 @@ class TradeSignalTests(unittest.TestCase):
 
     def test_activity_is_not_a_direction(self) -> None:
         state = detail()
-        state["spot"] = {"buy_pressure_5m": 1, "sell_pressure_5m": 1, "buy_volume_5m": 500, "sell_volume_5m": 500}
+        state["spot"] = {
+            "buy_pressure_5m": 1,
+            "sell_pressure_5m": 1,
+            "buy_volume_5m": 500,
+            "sell_volume_5m": 500,
+        }
         state["perp"] = {}
         self.assertEqual(calculate_trade_signal(state).bias, TradeBias.NONE)
 

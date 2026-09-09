@@ -2,6 +2,11 @@ classification:
   pressure: 2.0
   cvd: 0.0
   oi_change: 0.05
+  allow_missing_cvd: false
+trade_signal:
+  pressure: 2.0
+  pressure_dominance_ratio: 1.5
+  delta_ratio: 0.15
 funding:
   elevated_positive: 0.001
   elevated_negative: -0.001

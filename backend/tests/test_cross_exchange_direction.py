@@ -1,6 +1,11 @@
 import unittest
 
-from app.scoring import ClassificationThresholds, CrossExchangeState, MarketSignal, cross_exchange_state
+from app.scoring import (
+    ClassificationThresholds,
+    CrossExchangeState,
+    MarketSignal,
+    cross_exchange_state,
+)
 
 
 class CrossExchangeDirectionTests(unittest.TestCase):

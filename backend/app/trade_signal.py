@@ -6,15 +6,76 @@ only from normalized flow pressure and volume imbalance.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from enum import StrEnum
-from typing import Any, Mapping
+from math import isfinite
+from pathlib import Path
+from typing import Any
+
+import yaml
 
 
 class TradeBias(StrEnum):
     LONG = "LONG"
     SHORT = "SHORT"
     NONE = "NONE"
+
+
+@dataclass(frozen=True)
+class TradeSignalThresholds:
+    pressure: float = 2.0
+    pressure_dominance_ratio: float = 1.5
+    delta_ratio: float = 0.15
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "pressure", _nonnegative_float("pressure", self.pressure))
+        dominance = _finite_float("pressure_dominance_ratio", self.pressure_dominance_ratio)
+        if dominance < 1:
+            raise ValueError("pressure_dominance_ratio must be at least 1")
+        object.__setattr__(self, "pressure_dominance_ratio", dominance)
+        delta_ratio = _finite_float("delta_ratio", self.delta_ratio)
+        if not 0 <= delta_ratio <= 1:
+            raise ValueError("delta_ratio must be between 0 and 1")
+        object.__setattr__(self, "delta_ratio", delta_ratio)
+
+
+def load_trade_signal_thresholds(path: Path) -> TradeSignalThresholds:
+    """Load validated paper-trading signal thresholds from the scoring configuration."""
+    with path.open(encoding="utf-8") as file:
+        configured = yaml.safe_load(file)
+    if not isinstance(configured, Mapping):
+        raise ValueError("scoring configuration must be a mapping")
+    values = configured.get("trade_signal")
+    if not isinstance(values, Mapping):
+        raise ValueError("trade_signal configuration must be a mapping")
+    required = {"pressure", "pressure_dominance_ratio", "delta_ratio"}
+    missing = required - values.keys()
+    if missing:
+        raise ValueError(f"trade_signal configuration is missing: {', '.join(sorted(missing))}")
+    try:
+        return TradeSignalThresholds(**dict(values))
+    except TypeError as exc:
+        raise ValueError("trade_signal configuration has unsupported values") from exc
+
+
+def _finite_float(field: str, value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{field} must be a finite number")
+    number = float(value)
+    if not isfinite(number):
+        raise ValueError(f"{field} must be a finite number")
+    return number
+
+
+def _nonnegative_float(field: str, value: object) -> float:
+    number = _finite_float(field, value)
+    if number < 0:
+        raise ValueError(f"{field} must be a finite nonnegative number")
+    return number
+
+
+_DEFAULT_THRESHOLDS = TradeSignalThresholds()
 
 
 @dataclass(frozen=True)
@@ -33,13 +94,19 @@ class TradeSignal:
         return asdict(self) | {"bias": self.bias.value}
 
 
-def calculate_trade_signal(detail: Mapping[str, Any]) -> TradeSignal:
+def calculate_trade_signal(
+    detail: Mapping[str, Any], thresholds: TradeSignalThresholds = _DEFAULT_THRESHOLDS
+) -> TradeSignal:
     """Derive a bias from tolerant, exchange-normalized dashboard detail maps."""
     spot = _market_values(detail, "spot")
     perp = _market_values(detail, "perp")
     all_values = [detail, *spot, *perp]
-    buy_pressure = max((_number(item, "buy_pressure_5m", "buy_pressure") for item in all_values), default=0.0)
-    sell_pressure = max((_number(item, "sell_pressure_5m", "sell_pressure") for item in all_values), default=0.0)
+    buy_pressure = max(
+        (_number(item, "buy_pressure_5m", "buy_pressure") for item in all_values), default=0.0
+    )
+    sell_pressure = max(
+        (_number(item, "sell_pressure_5m", "sell_pressure") for item in all_values), default=0.0
+    )
     buy_volume = sum(_number(item, "buy_volume_5m") for item in [*spot, *perp])
     sell_volume = sum(_number(item, "sell_volume_5m") for item in [*spot, *perp])
     if buy_volume + sell_volume == 0:
@@ -47,9 +114,17 @@ def calculate_trade_signal(detail: Mapping[str, Any]) -> TradeSignal:
         sell_volume = _number(detail, "sell_volume_5m")
     total = buy_volume + sell_volume
     delta_ratio = (buy_volume - sell_volume) / total if total else 0.0
-    if buy_pressure >= 2.0 and buy_pressure >= sell_pressure * 1.5 and delta_ratio >= 0.15:
+    if (
+        buy_pressure >= thresholds.pressure
+        and buy_pressure >= sell_pressure * thresholds.pressure_dominance_ratio
+        and delta_ratio >= thresholds.delta_ratio
+    ):
         bias = TradeBias.LONG
-    elif sell_pressure >= 2.0 and sell_pressure >= buy_pressure * 1.5 and delta_ratio <= -0.15:
+    elif (
+        sell_pressure >= thresholds.pressure
+        and sell_pressure >= buy_pressure * thresholds.pressure_dominance_ratio
+        and delta_ratio <= -thresholds.delta_ratio
+    ):
         bias = TradeBias.SHORT
     else:
         bias = TradeBias.NONE

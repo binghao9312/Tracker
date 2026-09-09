@@ -29,11 +29,17 @@ class ScoringTests(unittest.TestCase):
             MarketSignal("binance", 3, 0, 0, 0, 20, None, 0),
             MarketSignal("okx", 3, 0, 0, 0, 20, None, 0),
         ]
-        self.assertEqual(cross_exchange_state(signals, self.thresholds), CrossExchangeState.CONFIRMED)
+        self.assertEqual(
+            cross_exchange_state(signals, self.thresholds), CrossExchangeState.CONFIRMED
+        )
         self.assertEqual(
             liquidity_fragility_score(
-                depth_2=[100, 10], impact_10k=[0.01, 0.1], impact_50k=[0.02, 0.2],
-                spread=[0.01, 0.1], capital_to_move_2=[1000, 100], index=1
+                depth_2=[100, 10],
+                impact_10k=[0.01, 0.1],
+                impact_50k=[0.02, 0.2],
+                spread=[0.01, 0.1],
+                capital_to_move_2=[1000, 100],
+                index=1,
             ),
             100,
         )

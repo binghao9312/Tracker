@@ -6,9 +6,8 @@ import argparse
 import asyncio
 
 import aiohttp
+
 from app.config import universe_path
-
-
 from app.discovery import MarketDiscoveryService
 from app.exchanges.binance import BinanceAdapter
 from app.exchanges.okx import OkxAdapter
