@@ -35,10 +35,25 @@ const scannerColumns = [
   "spot_cvd_5m", "perp_cvd_5m", "oi_change_5m", "funding", "move_type", "cross_exchange_state",
 ] as const satisfies readonly SortKey[];
 
-const marketChartPoints = (history: SymbolHistory): ChartPoint[] => (history.market ?? []).flatMap(({ timestamp, price }) => {
-  const milliseconds = typeof timestamp === "number" ? timestamp : Date.parse(timestamp);
-  return typeof price === "number" && Number.isFinite(price) && Number.isFinite(milliseconds) ? [{ timestamp: milliseconds, price }] : [];
-});
+const marketChartPoints = (history: SymbolHistory): ChartPoint[] => {
+  const raw = (history.market ?? []).flatMap(({ timestamp, price }) => {
+    const milliseconds = typeof timestamp === "number" ? timestamp : Date.parse(timestamp);
+    return typeof price === "number" && Number.isFinite(price) && Number.isFinite(milliseconds)
+      ? [{ timestamp: milliseconds, price }]
+      : [];
+  });
+  raw.sort((a, b) => a.timestamp - b.timestamp);
+  const deduped: ChartPoint[] = [];
+  let lastSec = -Infinity;
+  for (const pt of raw) {
+    const sec = Math.floor(pt.timestamp / 1000);
+    if (sec > lastSec) {
+      deduped.push(pt);
+      lastSec = sec;
+    }
+  }
+  return deduped;
+};
 
 
 export function App() {
@@ -121,9 +136,38 @@ export function App() {
 
   return <main className="terminal">
     <header className="toolbar"><strong>QTRADE / CEX LIQUIDITY & FLOW</strong><nav><button className={mode === "SCANNER" ? "active" : ""} onClick={() => setMode("SCANNER")}>SCANNER</button><button className={mode === "PAPER" ? "active" : ""} onClick={() => setMode("PAPER")}>PAPER</button></nav><span>BINANCE <i className="online"/> OKX <i className="online"/></span><span className="connection">{connection}</span></header>
-    {mode === "SCANNER" ? <><section className="scanner"><table><thead><tr>{scannerColumns.map(key => <th key={key} onClick={() => chooseSort(key)}>{key.replaceAll("_", " ")}{sort.key === key ? sort.descending ? " ↓" : " ↑" : ""}</th>)}</tr></thead><tbody>{ordered.map(row => <tr key={row.symbol} className={row.symbol === selected ? "selected" : ""} onClick={() => setSelected(row.symbol)}>{scannerColumns.map(key => <td key={key}>{typeof row[key] === "number" ? number(row[key], 4) : row[key] ?? "—"}</td>)}</tr>)}</tbody></table></section><section className="detail"><div><h2>{selected ?? "SELECT SYMBOL"}</h2>{detail ? <dl>{Object.entries(detail).filter(([, value]) => typeof value !== "object").map(([key, value]) => <div key={key}><dt>{key.replaceAll("_", " ")}</dt><dd>{typeof value === "number" ? number(value, 4) : String(value)}</dd></div>)}</dl> : <p>Choose a scanner row for exchange-normalized liquidity, flow, and derivatives metrics.</p>}</div><MetricChart data={historyPoints}/></section></> : <PaperPage stats={stats} positions={positions} trades={trades} replay={replay} currentPrices={currentPrices} onReplay={loadReplay} onCloseReplay={() => setReplay(null)}/>}
+    {mode === "SCANNER" ? <><section className="scanner"><table><thead><tr>{scannerColumns.map(key => <th key={key} onClick={() => chooseSort(key)}>{key.replaceAll("_", " ")}{sort.key === key ? sort.descending ? " ↓" : " ↑" : ""}</th>)}</tr></thead><tbody>{ordered.map(row => <tr key={row.symbol} className={row.symbol === selected ? "selected" : ""} onClick={() => setSelected(row.symbol)}>{scannerColumns.map(key => <td key={key}>{typeof row[key] === "number" ? number(row[key], 4) : row[key] ?? "—"}</td>)}</tr>)}</tbody></table></section><section className="detail"><DetailPane selected={selected} detail={detail}/><MetricChart data={historyPoints}/></section></> : <PaperPage stats={stats} positions={positions} trades={trades} replay={replay} currentPrices={currentPrices} onReplay={loadReplay} onCloseReplay={() => setReplay(null)}/>}
   </main>;
 }
+function DetailPane({ selected, detail }: { selected: string | null; detail: Detail | null }) {
+  if (!selected || !detail) {
+    return <div><h2>{selected ?? "SELECT SYMBOL"}</h2><p>Choose a scanner row for exchange-normalized liquidity, flow, and derivatives metrics.</p></div>;
+  }
+  const spot = (detail.spot ?? {}) as Detail;
+  const perp = (detail.perp ?? {}) as Detail;
+  const oiEx = (detail.oi_change_by_exchange ?? {}) as Record<string, Record<string, number | null>>;
+  const moveEx = (detail.move_type_by_exchange ?? {}) as Record<string, string>;
+  const dirEx = (detail.exchange_directions ?? {}) as Record<string, string>;
+  return <div className="detail-content">
+    <div className="detail-header"><h2>{selected} · {number(detail.price as number, 2)}</h2><div className="detail-tags"><span className="tag">{String(detail.move_type ?? "NEUTRAL")}</span><span className={`tag ${detail.cross_exchange_state === "CONFIRMED" ? "positive" : "negative"}`}>{String(detail.cross_exchange_state ?? "—")}</span></div></div>
+    <dl>
+      <div><dt>Activity Score</dt><dd>{number(detail.activity_score as number, 2)}</dd></div>
+      <div><dt>Liquidity Fragility</dt><dd>{number(detail.liquidity_fragility as number, 2)}</dd></div>
+      <div><dt>Funding Rate</dt><dd>{percent(detail.funding as number)}</dd></div>
+      <div><dt>OI Δ 5m</dt><dd>{percent(detail.oi_change_5m as number)}</dd></div>
+      <div><dt>OI Δ 15m</dt><dd>{percent(detail.oi_change_15m as number)}</dd></div>
+      <div><dt>OI Δ 1h</dt><dd>{percent(detail.oi_change_1h as number)}</dd></div>
+    </dl>
+    <div className="detail-subtable"><small>SPOT VS PERP FLOW</small><table><thead><tr><th>Market</th><th>Buy Press (1m/5m)</th><th>Sell Press (1m/5m)</th><th>5m CVD</th></tr></thead><tbody>
+      <tr><td>Spot</td><td>{number(spot.buy_pressure_1m as number)} / {number(spot.buy_pressure_5m as number)}</td><td>{number(spot.sell_pressure_1m as number)} / {number(spot.sell_pressure_5m as number)}</td><td className={(spot.cvd_5m as number ?? 0) >= 0 ? "positive" : "negative"}>{number(spot.cvd_5m as number, 0)}</td></tr>
+      <tr><td>Perp</td><td>{number(perp.buy_pressure_1m as number)} / {number(perp.buy_pressure_5m as number)}</td><td>{number(perp.sell_pressure_1m as number)} / {number(perp.sell_pressure_5m as number)}</td><td className={(perp.cvd_5m as number ?? 0) >= 0 ? "positive" : "negative"}>{number(perp.cvd_5m as number, 0)}</td></tr>
+    </tbody></table></div>
+    <div className="detail-subtable"><small>CROSS EXCHANGE EVIDENCE</small><table><thead><tr><th>Exchange</th><th>Direction</th><th>Move Type</th><th>OI Δ 5m</th></tr></thead><tbody>
+      {["binance", "okx"].map(ex => <tr key={ex}><td>{ex.toUpperCase()}</td><td className={dirEx[ex] === "BUY" ? "positive" : dirEx[ex] === "SELL" ? "negative" : ""}>{dirEx[ex] ?? "—"}</td><td>{moveEx[ex] ?? "—"}</td><td>{percent(oiEx[ex]?.["5m"])}</td></tr>)}
+    </tbody></table></div>
+  </div>;
+}
+
 
 function PaperPage({ stats, positions, trades, replay, currentPrices, onReplay, onCloseReplay }: { stats: PaperStats | null; positions: PaperTrade[]; trades: PaperTrade[]; replay: { trade: PaperTrade; entry_snapshot: Detail; exit_snapshot: Detail | null; history: { market: ChartPoint[] } } | null; currentPrices: Record<string, number>; onReplay: (trade: PaperTrade) => void; onCloseReplay: () => void }) {
   if (replay) return <section className="replay"><button onClick={onCloseReplay}>← PAPER TRADES</button><h2>TRADE REPLAY / {replay.trade.symbol} {replay.trade.side}</h2><p>Entry {new Date(replay.trade.opened_at).toLocaleString()} · Price {number(replay.trade.entry_price)} · Activity {number(replay.trade.entry_activity_score as number)} · Fragility {number(replay.trade.entry_liquidity_fragility as number)}</p><p>Exit {replay.trade.exit_reason ?? "OPEN"} · Price {number(replay.trade.exit_price)} · Return {percent(replay.trade.return_pct)} · PnL {number(replay.trade.net_pnl)} · MFE {percent(replay.trade.max_favorable_excursion_pct)} · MAE {percent(replay.trade.max_adverse_excursion_pct)}</p><MetricChart data={replay.history.market ?? []} markers={[{ timestamp: replay.trade.opened_at, price: replay.trade.entry_price, label: "ENTRY", color: "#42d392", position: "belowBar" }, ...(replay.trade.exit_price !== null && replay.trade.closed_at ? [{ timestamp: replay.trade.closed_at, price: replay.trade.exit_price, label: "EXIT", color: "#ff6b6b", position: "aboveBar" } as const] : [])]}/><SignalMetrics snapshot={replay.entry_snapshot}/></section>;
