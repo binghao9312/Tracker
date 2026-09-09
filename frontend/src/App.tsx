@@ -171,7 +171,7 @@ function DetailPane({ selected, detail }: { selected: string | null; detail: Det
 
 function PaperPage({ stats, positions, trades, replay, currentPrices, onReplay, onCloseReplay }: { stats: PaperStats | null; positions: PaperTrade[]; trades: PaperTrade[]; replay: { trade: PaperTrade; entry_snapshot: Detail; exit_snapshot: Detail | null; history: { market: ChartPoint[] } } | null; currentPrices: Record<string, number>; onReplay: (trade: PaperTrade) => void; onCloseReplay: () => void }) {
   if (replay) return <section className="replay"><button onClick={onCloseReplay}>← PAPER TRADES</button><h2>TRADE REPLAY / {replay.trade.symbol} {replay.trade.side}</h2><p>Entry {new Date(replay.trade.opened_at).toLocaleString()} · Price {number(replay.trade.entry_price)} · Activity {number(replay.trade.entry_activity_score as number)} · Fragility {number(replay.trade.entry_liquidity_fragility as number)}</p><p>Exit {replay.trade.exit_reason ?? "OPEN"} · Price {number(replay.trade.exit_price)} · Return {percent(replay.trade.return_pct)} · PnL {number(replay.trade.net_pnl)} · MFE {percent(replay.trade.max_favorable_excursion_pct)} · MAE {percent(replay.trade.max_adverse_excursion_pct)}</p><MetricChart data={replay.history.market ?? []} markers={[{ timestamp: replay.trade.opened_at, price: replay.trade.entry_price, label: "ENTRY", color: "#42d392", position: "belowBar" }, ...(replay.trade.exit_price !== null && replay.trade.closed_at ? [{ timestamp: replay.trade.closed_at, price: replay.trade.exit_price, label: "EXIT", color: "#ff6b6b", position: "aboveBar" } as const] : [])]}/><SignalMetrics snapshot={replay.entry_snapshot}/></section>;
-  return <section className="paper"><div className="stats">{[["TOTAL TRADES", stats?.total_trades], ["WIN RATE", stats ? percent(stats.win_rate) : null], ["NET PNL", stats?.net_pnl == null ? null : number(stats.net_pnl)], ["PROFIT FACTOR", stats?.profit_factor], ["OPEN POSITIONS", stats?.open_trades]].map(([label, value]) => <div key={String(label)}><small>{label}</small><strong>{typeof value === "number" ? number(value) : value ?? "—"}</strong></div>)}</div><h2>OPEN POSITIONS</h2><TradeTable trades={positions} currentPrices={currentPrices}/><h2>TRADE HISTORY</h2><TradeTable trades={trades} currentPrices={currentPrices} onReplay={onReplay}/>{stats?.breakdowns ? <pre className="breakdowns">{JSON.stringify(stats.breakdowns, null, 2)}</pre> : null}</section>;
+  return <section className="paper"><div className="stats">{[["TOTAL TRADES", stats?.total_trades], ["WIN RATE", stats ? percent(stats.win_rate) : null], ["NET PNL", stats?.net_pnl == null ? null : number(stats.net_pnl)], ["PROFIT FACTOR", stats?.profit_factor], ["OPEN POSITIONS", stats?.open_trades]].map(([label, value]) => <div key={String(label)}><small>{label}</small><strong>{typeof value === "number" ? number(value) : value ?? "—"}</strong></div>)}</div><h2>OPEN POSITIONS</h2><TradeTable trades={positions} currentPrices={currentPrices}/><h2>TRADE HISTORY</h2><TradeTable trades={trades} currentPrices={currentPrices} onReplay={onReplay}/><PerformanceBreakdowns breakdowns={stats?.breakdowns as Record<string, Record<string, BreakdownSummary>> | undefined}/></section>;
 }
 
 function TradeTable({ trades, currentPrices, onReplay }: { trades: PaperTrade[]; currentPrices: Record<string, number>; onReplay?: (trade: PaperTrade) => void }) {
@@ -182,3 +182,31 @@ function SignalMetrics({ snapshot }: { snapshot: Detail }) {
   const signal = (snapshot.trade_signal as Detail | undefined) ?? snapshot;
   return <dl className="signal-metrics">{["activity_score", "liquidity_fragility", "buy_pressure", "sell_pressure", "spot_cvd_5m", "perp_cvd_5m", "oi_change_5m", "funding", "move_type", "cross_exchange_state"].map(key => <div key={key}><dt>{key.replaceAll("_", " ")}</dt><dd>{typeof signal[key] === "number" ? number(signal[key] as number, 4) : String(signal[key] ?? "—")}</dd></div>)}</dl>;
 }
+type BreakdownSummary = { total_trades: number; win_rate: number; net_pnl: number; profit_factor: number | null; average_return_pct: number };
+
+function PerformanceBreakdowns({ breakdowns }: { breakdowns?: Record<string, Record<string, BreakdownSummary>> }) {
+  if (!breakdowns) return null;
+  const sections = [
+    { key: "move_type", title: "PERFORMANCE BY MOVE TYPE" },
+    { key: "cross_exchange", title: "PERFORMANCE BY CROSS-EXCHANGE STATE" },
+    { key: "activity_score", title: "PERFORMANCE BY ENTRY ACTIVITY SCORE" },
+    { key: "liquidity_fragility", title: "PERFORMANCE BY ENTRY LIQUIDITY FRAGILITY" },
+  ] as const;
+  const activeSections = sections.filter(({ key }) => Object.values(breakdowns[key] ?? {}).some(s => s.total_trades > 0));
+  if (activeSections.length === 0) return null;
+  return <div className="breakdown-grid">
+    {activeSections.map(({ key, title }) => {
+      const groups = breakdowns[key] ?? {};
+      return <div key={key} className="breakdown-card">
+        <h3>{title}</h3>
+        <table>
+          <thead><tr><th>Category</th><th>Trades</th><th>Win Rate</th><th>Net PnL</th><th>Profit Factor</th></tr></thead>
+          <tbody>
+            {Object.entries(groups).map(([name, s]) => <tr key={name}><td>{name}</td><td>{s.total_trades}</td><td>{percent(s.win_rate)}</td><td className={s.net_pnl >= 0 ? "positive" : "negative"}>{number(s.net_pnl)}</td><td>{s.profit_factor != null ? number(s.profit_factor) : "—"}</td></tr>)}
+          </tbody>
+        </table>
+      </div>;
+    })}
+  </div>;
+}
+
