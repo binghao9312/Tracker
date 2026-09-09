@@ -74,7 +74,7 @@ class DashboardDetail(BaseModel):
     spot: dict[str, Any] = Field(default_factory=dict)
     perp: dict[str, Any] = Field(default_factory=dict)
     orderbooks: dict[str, Any] = Field(default_factory=dict)
-
+    liquidity: dict[str, Any] = Field(default_factory=dict)
 
 class DashboardState:
     """Concurrency-safe latest-value cache; PostgreSQL remains the history source."""

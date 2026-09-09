@@ -374,6 +374,34 @@ class LiveRuntime:
             for name in ("5m", "15m", "1h")
         }
         funding = self._funding(symbol)
+        primary_liq = next(
+            (m for (_, m_type), m in metrics_by_book.items() if m_type is MarketType.PERP),
+            next(iter(metrics_by_book.values()), None),
+        )
+        liquidity_summary = (
+            {
+                "spread_percent": primary_liq.spread_percent,
+                "bid_depth_0_5": primary_liq.bid_depth_0_5,
+                "ask_depth_0_5": primary_liq.ask_depth_0_5,
+                "bid_depth_1": primary_liq.bid_depth_1,
+                "ask_depth_1": primary_liq.ask_depth_1,
+                "bid_depth_2": primary_liq.bid_depth_2,
+                "ask_depth_2": primary_liq.ask_depth_2,
+                "bid_depth_5": primary_liq.bid_depth_5,
+                "ask_depth_5": primary_liq.ask_depth_5,
+                "buy_impact_10k": primary_liq.buy_impacts.get(10_000),
+                "sell_impact_10k": primary_liq.sell_impacts.get(10_000),
+                "buy_impact_50k": primary_liq.buy_impacts.get(50_000),
+                "sell_impact_50k": primary_liq.sell_impacts.get(50_000),
+                "capital_to_move_up_1pct": primary_liq.capital_to_move_up.get(1),
+                "capital_to_move_up_2pct": primary_liq.capital_to_move_up.get(2),
+                "capital_to_move_down_1pct": primary_liq.capital_to_move_down.get(1),
+                "capital_to_move_down_2pct": primary_liq.capital_to_move_down.get(2),
+                "order_book_imbalance": primary_liq.order_book_imbalance,
+            }
+            if primary_liq is not None
+            else {}
+        )
         detail = {
             "price": self._preferred_price(metrics_by_book),
             "activity_score": activity_score(
@@ -416,6 +444,7 @@ class LiveRuntime:
             "spot": self._public_flow(spot),
             "perp": self._public_flow(perp),
             "orderbooks": self._public_books(symbol),
+            "liquidity": liquidity_summary,
         }
         return detail
 

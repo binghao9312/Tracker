@@ -133,7 +133,6 @@ export function App() {
   const chooseSort = (key: SortKey) => setSort(current => ({ key, descending: current.key === key ? !current.descending : key !== "symbol" }));
   const loadReplay = (trade: PaperTrade) => void fetch(`/api/paper/trades/${trade.id}`).then(response => response.json()).then(setReplay);
   const currentPrices = useMemo(() => Object.fromEntries(rows.filter(row => row.price != null).map(row => [row.symbol, row.price!])), [rows]);
-
   return <main className="terminal">
     <header className="toolbar"><strong>QTRADE / CEX LIQUIDITY & FLOW</strong><nav><button className={mode === "SCANNER" ? "active" : ""} onClick={() => setMode("SCANNER")}>SCANNER</button><button className={mode === "PAPER" ? "active" : ""} onClick={() => setMode("PAPER")}>PAPER</button></nav><span>BINANCE <i className="online"/> OKX <i className="online"/></span><span className="connection">{connection}</span></header>
     {mode === "SCANNER" ? <><section className="scanner"><table><thead><tr>{scannerColumns.map(key => <th key={key} onClick={() => chooseSort(key)}>{key.replaceAll("_", " ")}{sort.key === key ? sort.descending ? " ↓" : " ↑" : ""}</th>)}</tr></thead><tbody>{ordered.map(row => <tr key={row.symbol} className={row.symbol === selected ? "selected" : ""} onClick={() => setSelected(row.symbol)}>{scannerColumns.map(key => <td key={key}>{typeof row[key] === "number" ? number(row[key], 4) : row[key] ?? "—"}</td>)}</tr>)}</tbody></table></section><section className="detail"><DetailPane selected={selected} detail={detail}/><MetricChart data={historyPoints}/></section></> : <PaperPage stats={stats} positions={positions} trades={trades} replay={replay} currentPrices={currentPrices} onReplay={loadReplay} onCloseReplay={() => setReplay(null)}/>}
@@ -145,6 +144,7 @@ function DetailPane({ selected, detail }: { selected: string | null; detail: Det
   }
   const spot = (detail.spot ?? {}) as Detail;
   const perp = (detail.perp ?? {}) as Detail;
+  const liq = (detail.liquidity ?? {}) as Record<string, number | null | undefined>;
   const oiEx = (detail.oi_change_by_exchange ?? {}) as Record<string, Record<string, number | null>>;
   const moveEx = (detail.move_type_by_exchange ?? {}) as Record<string, string>;
   const dirEx = (detail.exchange_directions ?? {}) as Record<string, string>;
@@ -158,6 +158,11 @@ function DetailPane({ selected, detail }: { selected: string | null; detail: Det
       <div><dt>OI Δ 15m</dt><dd>{percent(detail.oi_change_15m as number)}</dd></div>
       <div><dt>OI Δ 1h</dt><dd>{percent(detail.oi_change_1h as number)}</dd></div>
     </dl>
+    <div className="detail-subtable"><small>ORDER BOOK DEPTH & IMPACT</small><table><thead><tr><th>Metric</th><th>Bid / Down</th><th>Ask / Up</th><th>Context</th></tr></thead><tbody>
+      <tr><td>Depth ±2%</td><td>{number(liq.bid_depth_2 as number, 0)} USDT</td><td>{number(liq.ask_depth_2 as number, 0)} USDT</td><td>Spread {number(liq.spread_percent as number, 2)}%</td></tr>
+      <tr><td>$10K Impact</td><td>{percent(liq.sell_impact_10k as number)}</td><td>{percent(liq.buy_impact_10k as number)}</td><td>$50K {percent(liq.buy_impact_50k as number)}</td></tr>
+      <tr><td>Cap to Move 1%</td><td>{number(liq.capital_to_move_down_1pct as number, 0)} USDT</td><td>{number(liq.capital_to_move_up_1pct as number, 0)} USDT</td><td>OBI {number(liq.order_book_imbalance as number, 3)}</td></tr>
+    </tbody></table></div>
     <div className="detail-subtable"><small>SPOT VS PERP FLOW</small><table><thead><tr><th>Market</th><th>Buy Press (1m/5m)</th><th>Sell Press (1m/5m)</th><th>5m CVD</th></tr></thead><tbody>
       <tr><td>Spot</td><td>{number(spot.buy_pressure_1m as number)} / {number(spot.buy_pressure_5m as number)}</td><td>{number(spot.sell_pressure_1m as number)} / {number(spot.sell_pressure_5m as number)}</td><td className={(spot.cvd_5m as number ?? 0) >= 0 ? "positive" : "negative"}>{number(spot.cvd_5m as number, 0)}</td></tr>
       <tr><td>Perp</td><td>{number(perp.buy_pressure_1m as number)} / {number(perp.buy_pressure_5m as number)}</td><td>{number(perp.sell_pressure_1m as number)} / {number(perp.sell_pressure_5m as number)}</td><td className={(perp.cvd_5m as number ?? 0) >= 0 ? "positive" : "negative"}>{number(perp.cvd_5m as number, 0)}</td></tr>
