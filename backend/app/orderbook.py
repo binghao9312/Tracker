@@ -83,7 +83,7 @@ class LocalOrderBook:
         current_sequence = self._require_sync()
         is_first_increment = previous_final_sequence is None
         valid = (
-            first_sequence <= current_sequence + 1 <= final_sequence
+            first_sequence <= current_sequence <= final_sequence
             if is_first_increment
             else previous_final_sequence == current_sequence
         )

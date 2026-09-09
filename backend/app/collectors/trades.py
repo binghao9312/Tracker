@@ -110,12 +110,13 @@ class BinanceTradeManager(_TradeManager):
         host = (
             "stream.binance.com:9443" if self._market is MarketType.SPOT else "fstream.binance.com"
         )
+        path = "/stream" if self._market is MarketType.SPOT else "/market/stream"
         streams = "/".join(
             f"{instrument.exchange_symbol.lower()}@aggTrade"
             for instrument in self._instruments.values()
         )
         async with self._session.ws_connect(
-            f"wss://{host}/stream?streams={streams}", heartbeat=20
+            f"wss://{host}{path}?streams={streams}", heartbeat=20
         ) as websocket:
             async for message in websocket:
                 if stop.is_set():

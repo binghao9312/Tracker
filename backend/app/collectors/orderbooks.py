@@ -144,12 +144,13 @@ class BinanceOrderBookManager(_OrderBookManager):
         host = (
             "stream.binance.com:9443" if self._market is MarketType.SPOT else "fstream.binance.com"
         )
+        path = "/stream" if self._market is MarketType.SPOT else "/public/stream"
         streams = "/".join(
             f"{instrument.exchange_symbol.lower()}@depth@100ms"
             for instrument, _ in self._books.values()
         )
         async with self._session.ws_connect(
-            f"wss://{host}/stream?streams={streams}", heartbeat=20
+            f"wss://{host}{path}?streams={streams}", heartbeat=20
         ) as websocket:
             # The opened socket buffers increments while every book gets a fresh REST baseline.
             await self._bootstrap_all()

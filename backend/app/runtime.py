@@ -241,23 +241,37 @@ class LiveRuntime:
             book_manager = BinanceOrderBookManager(
                 self._session, adapter, market, books, self.on_order_book
             )
-        else:
-            if not isinstance(adapter, OkxAdapter):
-                raise RuntimeError("OKX stream manager has the wrong adapter")
-            trade_manager = OkxTradeManager(self._session, market, instruments, self.on_trade)
-            book_manager = OkxOrderBookManager(
-                self._session, adapter, market, books, self.on_order_book
-            )
-        return [
+            return [
+                asyncio.create_task(
+                    trade_manager.run(self._stop),
+                    name=f"trades:{exchange}:{market}",
+                ),
+                asyncio.create_task(
+                    book_manager.run(self._stop),
+                    name=f"book:{exchange}:{market}",
+                ),
+            ]
+
+        if not isinstance(adapter, OkxAdapter):
+            raise RuntimeError("OKX stream manager has the wrong adapter")
+        trade_manager = OkxTradeManager(self._session, market, instruments, self.on_trade)
+        tasks = [
             asyncio.create_task(
                 trade_manager.run(self._stop),
                 name=f"trades:{exchange}:{market}",
-            ),
-            asyncio.create_task(
-                book_manager.run(self._stop),
-                name=f"book:{exchange}:{market}",
-            ),
+            )
         ]
+        for chunk_index, start in enumerate(range(0, len(books), 25)):
+            book_manager = OkxOrderBookManager(
+                self._session, adapter, market, books[start : start + 25], self.on_order_book
+            )
+            tasks.append(
+                asyncio.create_task(
+                    book_manager.run(self._stop),
+                    name=f"book:{exchange}:{market}:{chunk_index}",
+                )
+            )
+        return tasks
 
     def _derivative_task(
         self, instrument: MarketInstrument, index: int = 0

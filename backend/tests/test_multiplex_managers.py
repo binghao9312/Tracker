@@ -2,23 +2,31 @@ import asyncio
 import json
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import aiohttp
 
 from app.api import DashboardState
-from app.collectors.orderbooks import OkxOrderBookManager
-from app.collectors.trades import OkxTradeManager
+from app.collectors.orderbooks import BinanceOrderBookManager, OkxOrderBookManager
+from app.collectors.trades import BinanceTradeManager, OkxTradeManager
 from app.discovery import DiscoveryResult
+from app.exchanges.okx import OkxAdapter
 from app.models import Exchange, MarketInstrument, MarketType, NormalizedTrade, UniverseAsset
 from app.orderbook import LocalOrderBook, OrderBookSequenceGap, SequencedOrderBookSnapshot
 from app.runtime import LiveRuntime
 
 
-def instrument(symbol: str, exchange_symbol: str) -> MarketInstrument:
+def instrument(
+    symbol: str,
+    exchange_symbol: str,
+    *,
+    exchange: Exchange = Exchange.OKX,
+    market: MarketType = MarketType.PERP,
+) -> MarketInstrument:
     return MarketInstrument(
-        exchange=Exchange.OKX,
+        exchange=exchange,
         symbol=symbol,
-        market=MarketType.PERP,
+        market=market,
         exchange_symbol=exchange_symbol,
         base_quantity_multiplier=0.1,
     )
@@ -51,8 +59,10 @@ class FakeSession:
     def __init__(self, sockets: list[FakeWebSocket]) -> None:
         self.sockets = sockets
         self.calls = 0
+        self.urls: list[str] = []
 
-    def ws_connect(self, *_: object, **__: object) -> FakeWebSocket:
+    def ws_connect(self, url: str, **__: object) -> FakeWebSocket:
+        self.urls.append(url)
         socket = self.sockets[self.calls]
         self.calls += 1
         return socket
@@ -80,6 +90,52 @@ class SnapshotAdapter:
 
 
 class MultiplexManagerRegressionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_binance_combined_stream_urls_depend_on_market(self) -> None:
+        cases = (
+            (
+                MarketType.SPOT,
+                "wss://stream.binance.com:9443/stream?streams=btcusdt@depth@100ms",
+                "wss://stream.binance.com:9443/stream?streams=btcusdt@aggTrade",
+            ),
+            (
+                MarketType.PERP,
+                "wss://fstream.binance.com/public/stream?streams=btcusdt@depth@100ms",
+                "wss://fstream.binance.com/market/stream?streams=btcusdt@aggTrade",
+            ),
+        )
+
+        async def on_book(_: object) -> None:
+            return None
+
+        async def on_trade(_: NormalizedTrade) -> None:
+            return None
+
+        for market, depth_url, trade_url in cases:
+            with self.subTest(market=market):
+                binance = instrument(
+                    "BTCUSDT",
+                    "BTCUSDT",
+                    exchange=Exchange.BINANCE,
+                    market=market,
+                )
+                stop = asyncio.Event()
+                stop.set()
+                book_session = FakeSession([FakeWebSocket([])])
+                await BinanceOrderBookManager(
+                    book_session,
+                    SnapshotAdapter([100]),
+                    market,
+                    [(binance, LocalOrderBook())],
+                    on_book,
+                )._synchronize_and_stream(stop)
+                trade_session = FakeSession([FakeWebSocket([])])
+                await BinanceTradeManager(
+                    trade_session, market, [binance], on_trade
+                )._stream(stop)
+
+                self.assertEqual(book_session.urls, [depth_url])
+                self.assertEqual(trade_session.urls, [trade_url])
+
     async def test_one_trade_and_book_connection_routes_multiple_instruments(self) -> None:
         btc, eth = instrument("BTCUSDT", "BTC-USDT-SWAP"), instrument("ETHUSDT", "ETH-USDT-SWAP")
         received_trades: list[NormalizedTrade] = []
@@ -300,6 +356,57 @@ class RuntimeMultiplexTaskRegressionTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await runtime.stop()
 
+
+    async def test_okx_book_managers_chunk_fifty_instruments_at_twenty_five(self) -> None:
+        instruments = [
+            instrument(
+                f"ASSET{index}USDT",
+                f"ASSET{index}-USDT",
+                market=MarketType.SPOT,
+            )
+            for index in range(50)
+        ]
+        chunks: list[list[tuple[MarketInstrument, LocalOrderBook]]] = []
+
+        class RecordingOkxOrderBookManager:
+            def __init__(
+                self,
+                _: object,
+                __: object,
+                ___: MarketType,
+                books: list[tuple[MarketInstrument, LocalOrderBook]],
+                ____: object,
+            ) -> None:
+                chunks.append(books)
+
+            async def run(self, stop: asyncio.Event) -> None:
+                await stop.wait()
+
+        runtime = LiveRuntime(DashboardState([]), object(), session=object())
+        with patch("app.runtime.OkxOrderBookManager", RecordingOkxOrderBookManager):
+            tasks = runtime._stream_tasks(
+                Exchange.OKX,
+                MarketType.SPOT,
+                instruments,
+                {Exchange.OKX: OkxAdapter(object())},
+            )
+        try:
+            self.assertEqual(
+                [task.get_name() for task in tasks],
+                ["trades:okx:spot", "book:okx:spot:0", "book:okx:spot:1"],
+            )
+            self.assertEqual([len(chunk) for chunk in chunks], [25, 25])
+            self.assertEqual(
+                [[entry[0].exchange_symbol for entry in chunk] for chunk in chunks],
+                [
+                    [f"ASSET{index}-USDT" for index in range(25)],
+                    [f"ASSET{index}-USDT" for index in range(25, 50)],
+                ],
+            )
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
 if __name__ == "__main__":
     unittest.main()
