@@ -101,9 +101,9 @@ class LiveRuntime:
                 groups[(instrument.exchange, instrument.market)].append(instrument)
             for (exchange, market), instruments in groups.items():
                 self._tasks.extend(self._stream_tasks(exchange, market, instruments, adapters))
-            for instrument in result.markets:
-                if instrument.market is MarketType.PERP:
-                    self._tasks.append(self._derivative_task(instrument))
+            perp_instruments = [m for m in result.markets if m.market is MarketType.PERP]
+            for index, instrument in enumerate(perp_instruments):
+                self._tasks.append(self._derivative_task(instrument, index=index))
             self._tasks.append(asyncio.create_task(self._run_cadence(), name="metric-cadence"))
         except BaseException:
             await self.stop()
@@ -146,18 +146,31 @@ class LiveRuntime:
             if asset.enabled and asset.rank <= 50
         }
         active_symbols = sorted({symbol for _, symbol, _ in self._books if symbol in monitored})
+        batch_markets: list[dict[str, Any]] = []
+        batch_flows: list[dict[str, Any]] = []
+        batch_derivatives: list[dict[str, Any]] = []
         metrics_by_symbol: dict[str, dict[tuple[Exchange, MarketType], LiquidityMetrics]] = {}
         for symbol in active_symbols:
-            metrics_by_book = await self._collect_liquidities(symbol)
+            metrics_by_book = await self._collect_liquidities(symbol, batch=batch_markets)
             if metrics_by_book:
                 metrics_by_symbol[symbol] = metrics_by_book
         fragilities = liquidity_fragility_scores(
             {symbol: list(metrics.values()) for symbol, metrics in metrics_by_symbol.items()}
         )
         for symbol, metrics_by_book in metrics_by_symbol.items():
-            detail = await self._build_detail(symbol, metrics_by_book, fragilities[symbol])
+            detail = await self._build_detail(
+                symbol,
+                metrics_by_book,
+                fragilities[symbol],
+                batch_flows=batch_flows,
+                batch_derivatives=batch_derivatives,
+            )
             await self.state.update_symbol(symbol, detail)
-
+        await self._persist_metrics_batch(
+            markets=batch_markets,
+            flows=batch_flows,
+            derivatives=batch_derivatives,
+        )
     async def _run_cadence(self) -> None:
         while not self._stop.is_set():
             try:
@@ -165,6 +178,24 @@ class LiveRuntime:
             except TimeoutError:
                 self._dirty_symbols.update(symbol for _, symbol, _ in self._books)
                 await self.flush()
+    async def _persist_metrics_batch(
+        self,
+        *,
+        markets: list[dict[str, Any]],
+        flows: list[dict[str, Any]],
+        derivatives: list[dict[str, Any]],
+    ) -> None:
+        if hasattr(self.metrics, "append_batch"):
+            await self.metrics.append_batch(
+                markets=markets, flows=flows, derivatives=derivatives
+            )
+            return
+        for m in markets:
+            await self.metrics.append_market(m)
+        for f in flows:
+            await self.metrics.append_flow(f)
+        for d in derivatives:
+            await self.metrics.append_derivative(d)
 
     def _adapters(self) -> dict[Exchange, BinanceAdapter | OkxAdapter]:
         if self._session is None:
@@ -211,7 +242,9 @@ class LiveRuntime:
             ),
         ]
 
-    def _derivative_task(self, instrument: MarketInstrument) -> asyncio.Task[None]:
+    def _derivative_task(
+        self, instrument: MarketInstrument, index: int = 0
+    ) -> asyncio.Task[None]:
         if self._session is None:
             raise RuntimeError("runtime session is not initialized")
         provider = (
@@ -220,7 +253,9 @@ class LiveRuntime:
             else OkxDerivativesProvider(AiohttpJsonClient(self._session))
         )
         collector = DerivativePollingCollector(
-            lambda: provider.snapshot(instrument), self.on_derivative
+            lambda: provider.snapshot(instrument),
+            self.on_derivative,
+            initial_delay_seconds=(index % 10) * 1.5,
         )
         return asyncio.create_task(
             collector.run(self._stop),
@@ -228,7 +263,7 @@ class LiveRuntime:
         )
 
     async def _collect_liquidities(
-        self, symbol: str
+        self, symbol: str, batch: list[dict[str, Any]] | None = None
     ) -> dict[tuple[Exchange, MarketType], LiquidityMetrics]:
         metrics_by_book: dict[tuple[Exchange, MarketType], LiquidityMetrics] = {}
         for (exchange, book_symbol, market), book in self._books.items():
@@ -240,29 +275,31 @@ class LiveRuntime:
                 continue
             metrics_by_book[(exchange, market)] = liquidity
             timestamp = datetime.now(UTC)
-            await self.metrics.append_market(
-                {
-                    "timestamp": timestamp,
-                    "exchange": exchange.value,
-                    "symbol": symbol,
-                    "market": market.value,
-                    "price": liquidity.mid_price,
-                    "spread": liquidity.spread_percent,
-                    "bid_depth_0_5": liquidity.bid_depth_0_5,
-                    "ask_depth_0_5": liquidity.ask_depth_0_5,
-                    "bid_depth_1": liquidity.bid_depth_1,
-                    "ask_depth_1": liquidity.ask_depth_1,
-                    "bid_depth_2": liquidity.bid_depth_2,
-                    "ask_depth_2": liquidity.ask_depth_2,
-                    "bid_depth_5": liquidity.bid_depth_5,
-                    "ask_depth_5": liquidity.ask_depth_5,
-                    "buy_impact_10k": liquidity.buy_impacts[10_000],
-                    "sell_impact_10k": liquidity.sell_impacts[10_000],
-                    "buy_impact_50k": liquidity.buy_impacts[50_000],
-                    "sell_impact_50k": liquidity.sell_impacts[50_000],
-                    "obi": liquidity.order_book_imbalance,
-                }
-            )
+            metric_row = {
+                "timestamp": timestamp,
+                "exchange": exchange.value,
+                "symbol": symbol,
+                "market": market.value,
+                "price": liquidity.mid_price,
+                "spread": liquidity.spread_percent,
+                "bid_depth_0_5": liquidity.bid_depth_0_5,
+                "ask_depth_0_5": liquidity.ask_depth_0_5,
+                "bid_depth_1": liquidity.bid_depth_1,
+                "ask_depth_1": liquidity.ask_depth_1,
+                "bid_depth_2": liquidity.bid_depth_2,
+                "ask_depth_2": liquidity.ask_depth_2,
+                "bid_depth_5": liquidity.bid_depth_5,
+                "ask_depth_5": liquidity.ask_depth_5,
+                "buy_impact_10k": liquidity.buy_impacts[10_000],
+                "sell_impact_10k": liquidity.sell_impacts[10_000],
+                "buy_impact_50k": liquidity.buy_impacts[50_000],
+                "sell_impact_50k": liquidity.sell_impacts[50_000],
+                "obi": liquidity.order_book_imbalance,
+            }
+            if batch is not None:
+                batch.append(metric_row)
+            else:
+                await self.metrics.append_market(metric_row)
         return metrics_by_book
 
     async def _build_detail(
@@ -270,9 +307,14 @@ class LiveRuntime:
         symbol: str,
         metrics_by_book: dict[tuple[Exchange, MarketType], LiquidityMetrics],
         fragility: float,
+        *,
+        batch_flows: list[dict[str, Any]] | None = None,
+        batch_derivatives: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         market_flows = {
-            market: await self._persist_flow(symbol, market, metrics_by_book)
+            market: await self._persist_flow(
+                symbol, market, metrics_by_book, batch=batch_flows
+            )
             for market in MarketType
         }
         spot = market_flows[MarketType.SPOT]
@@ -304,20 +346,21 @@ class LiveRuntime:
                 )
             )
             if derivative is not None:
-                await self.metrics.append_derivative(
-                    {
-                        "timestamp": datetime.now(UTC),
-                        "exchange": exchange.value,
-                        "symbol": symbol,
-                        "open_interest": derivative.open_interest,
-                        "open_interest_usd": derivative.open_interest_usd,
-                        "oi_change_5m": oi_changes["5m"],
-                        "oi_change_15m": oi_changes["15m"],
-                        "oi_change_1h": oi_changes["1h"],
-                        "funding_rate": derivative.funding_rate,
-                    }
-                )
-
+                derivative_row = {
+                    "timestamp": datetime.now(UTC),
+                    "exchange": exchange.value,
+                    "symbol": symbol,
+                    "open_interest": derivative.open_interest,
+                    "open_interest_usd": derivative.open_interest_usd,
+                    "oi_change_5m": oi_changes["5m"],
+                    "oi_change_15m": oi_changes["15m"],
+                    "oi_change_1h": oi_changes["1h"],
+                    "funding_rate": derivative.funding_rate,
+                }
+                if batch_derivatives is not None:
+                    batch_derivatives.append(derivative_row)
+                else:
+                    await self.metrics.append_derivative(derivative_row)
         confirmed = cross_exchange_state(exchange_signals, self._thresholds)
         move_type_by_exchange = {
             signal.exchange: classify_move(signal, self._thresholds).value
@@ -381,6 +424,8 @@ class LiveRuntime:
         symbol: str,
         market: MarketType,
         liquidities: dict[tuple[Exchange, MarketType], LiquidityMetrics],
+        *,
+        batch: list[dict[str, Any]] | None = None,
     ) -> dict[str, float | None]:
         aggregate_keys = (
             "buy_volume_1m",
@@ -403,24 +448,26 @@ class LiveRuntime:
             sell_pressure_1m = pressure(one.sell_volume, liquidity.bid_depth_2)
             buy_pressure_5m = pressure(five.buy_volume, liquidity.ask_depth_2)
             sell_pressure_5m = pressure(five.sell_volume, liquidity.bid_depth_2)
-            await self.metrics.append_flow(
-                {
-                    "timestamp": datetime.now(UTC),
-                    "exchange": exchange.value,
-                    "symbol": symbol,
-                    "market": market.value,
-                    "buy_volume_1m": one.buy_volume,
-                    "sell_volume_1m": one.sell_volume,
-                    "buy_volume_5m": five.buy_volume,
-                    "sell_volume_5m": five.sell_volume,
-                    "cvd_1m": one.cvd,
-                    "cvd_5m": five.cvd,
-                    "buy_pressure_1m": buy_pressure_1m,
-                    "buy_pressure_5m": buy_pressure_5m,
-                    "sell_pressure_1m": sell_pressure_1m,
-                    "sell_pressure_5m": sell_pressure_5m,
-                }
-            )
+            flow_row = {
+                "timestamp": datetime.now(UTC),
+                "exchange": exchange.value,
+                "symbol": symbol,
+                "market": market.value,
+                "buy_volume_1m": one.buy_volume,
+                "sell_volume_1m": one.sell_volume,
+                "buy_volume_5m": five.buy_volume,
+                "sell_volume_5m": five.sell_volume,
+                "cvd_1m": one.cvd,
+                "cvd_5m": five.cvd,
+                "buy_pressure_1m": buy_pressure_1m,
+                "buy_pressure_5m": buy_pressure_5m,
+                "sell_pressure_1m": sell_pressure_1m,
+                "sell_pressure_5m": sell_pressure_5m,
+            }
+            if batch is not None:
+                batch.append(flow_row)
+            else:
+                await self.metrics.append_flow(flow_row)
             values = {
                 "buy_volume_1m": one.buy_volume,
                 "sell_volume_1m": one.sell_volume,
@@ -437,18 +484,12 @@ class LiveRuntime:
                 if key in combined and value is not None:
                     combined[key] = float(combined[key] or 0) + float(value)
                 combined[f"{exchange.value}:{key}"] = value
-        combined["buy_pressure_1m"] = self._ratio(
-            combined["buy_volume_1m"], self._depth_for_market(symbol, market, "ask")
-        )
-        combined["buy_pressure_5m"] = self._ratio(
-            combined["buy_volume_5m"], self._depth_for_market(symbol, market, "ask")
-        )
-        combined["sell_pressure_1m"] = self._ratio(
-            combined["sell_volume_1m"], self._depth_for_market(symbol, market, "bid")
-        )
-        combined["sell_pressure_5m"] = self._ratio(
-            combined["sell_volume_5m"], self._depth_for_market(symbol, market, "bid")
-        )
+        depth_ask = self._depth_for_market(symbol, market, "ask", liquidities=liquidities)
+        depth_bid = self._depth_for_market(symbol, market, "bid", liquidities=liquidities)
+        combined["buy_pressure_1m"] = self._ratio(combined["buy_volume_1m"], depth_ask)
+        combined["buy_pressure_5m"] = self._ratio(combined["buy_volume_5m"], depth_ask)
+        combined["sell_pressure_1m"] = self._ratio(combined["sell_volume_1m"], depth_bid)
+        combined["sell_pressure_5m"] = self._ratio(combined["sell_volume_5m"], depth_bid)
         return combined
 
     def _preferred_price(
@@ -512,7 +553,20 @@ class LiveRuntime:
         ]
         return sum(values) / len(values) if values else None
 
-    def _depth_for_market(self, symbol: str, market: MarketType, side: str) -> float:
+    def _depth_for_market(
+        self,
+        symbol: str,
+        market: MarketType,
+        side: str,
+        *,
+        liquidities: dict[tuple[Exchange, MarketType], LiquidityMetrics] | None = None,
+    ) -> float:
+        if liquidities is not None:
+            return sum(
+                liq.ask_depth_2 if side == "ask" else liq.bid_depth_2
+                for (_, book_market), liq in liquidities.items()
+                if book_market is market
+            )
         total = 0.0
         for (_exchange, book_symbol, book_market), book in self._books.items():
             if book_symbol == symbol and book_market is market:

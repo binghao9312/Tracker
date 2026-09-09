@@ -79,6 +79,7 @@ class _OrderBookManager:
         if any(instrument.market is not market for instrument, _ in self._books.values()):
             raise ValueError("order book manager instruments must share a market")
         self._on_update = on_update
+        self._last_published_ms: dict[str, int] = {}
 
     async def run(self, stop: asyncio.Event) -> None:
         delay = 1.0
@@ -90,8 +91,10 @@ class _OrderBookManager:
                 raise
             except (aiohttp.ClientError, OSError, ValueError, OrderBookSequenceGap) as error:
                 logger.warning(
-                    "orderbook_manager_resync",
-                    extra={"manager": type(self).__name__, "error": str(error)},
+                    "orderbook_manager_resync: %s (%s): %s",
+                    type(self).__name__,
+                    self._market.value,
+                    error,
                 )
                 await self._sleep_or_stop(stop, delay)
                 delay = min(delay * 2, 30.0)
@@ -106,9 +109,14 @@ class _OrderBookManager:
         except TimeoutError:
             pass
 
-    async def _publish(self, book: LocalOrderBook) -> None:
-        await self._on_update(book.to_model(time_ns() // 1_000_000))
-
+    async def _publish(self, book: LocalOrderBook, *, force: bool = False) -> None:
+        now_ms = time_ns() // 1_000_000
+        if not force and book.sequence is not None:
+            last_ms = self._last_published_ms.get(book.symbol, 0)
+            if now_ms - last_ms < 100:
+                return
+            self._last_published_ms[book.symbol] = now_ms
+        await self._on_update(book.to_model(now_ms))
 
 class BinanceOrderBookManager(_OrderBookManager):
     """Synchronize one Binance market group from a combined depth stream."""
@@ -187,8 +195,9 @@ class BinanceOrderBookManager(_OrderBookManager):
                         )
                 except (KeyError, ValueError, InvalidOperation) as error:
                     raise ValueError("invalid Binance depth update") from error
+                is_initial = first_increment[exchange_symbol]
                 first_increment[exchange_symbol] = False
-                await self._publish(book)
+                await self._publish(book, force=is_initial)
         if not stop.is_set():
             raise ConnectionError("Binance WebSocket disconnected")
 
@@ -209,11 +218,22 @@ class OkxOrderBookManager(_OrderBookManager):
 
     async def _bootstrap_all(self) -> None:
         entries = tuple(self._books.values())
-        snapshots = await asyncio.gather(
-            *(self._adapter.fetch_order_book_snapshot(instrument) for instrument, _ in entries)
-        )
-        for (_, book), snapshot in zip(entries, snapshots, strict=True):
-            book.bootstrap(snapshot)
+        sem = asyncio.Semaphore(5)
+
+        async def fetch(instrument: MarketInstrument, book: LocalOrderBook) -> None:
+            async with sem:
+                for attempt in range(4):
+                    try:
+                        snapshot = await self._adapter.fetch_order_book_snapshot(instrument)
+                        book.bootstrap(snapshot)
+                        return
+                    except ValueError as error:
+                        if "50011" in str(error) or "rate limit" in str(error).lower():
+                            await asyncio.sleep(0.4 * (attempt + 1))
+                            continue
+                        raise
+
+        await asyncio.gather(*(fetch(instrument, book) for instrument, book in entries))
 
     async def _synchronize_and_stream(self, stop: asyncio.Event) -> None:
         async with self._session.ws_connect(
@@ -238,6 +258,8 @@ class OkxOrderBookManager(_OrderBookManager):
                 if message.type is not aiohttp.WSMsgType.TEXT:
                     continue
                 event = _json_object(message.data)
+                if "event" in event:
+                    continue
                 argument = event.get("arg")
                 if not isinstance(argument, dict) or argument.get("channel") != "books":
                     continue
@@ -252,6 +274,8 @@ class OkxOrderBookManager(_OrderBookManager):
                     raise ValueError("invalid OKX depth update")
                 is_snapshot = event.get("action") == "snapshot"
                 instrument, book = entry
+                if not is_snapshot and book.sequence is None:
+                    continue
                 for update in records:
                     if not isinstance(update, dict):
                         raise ValueError("invalid OKX depth update")
@@ -294,7 +318,7 @@ class OkxOrderBookManager(_OrderBookManager):
                             )
                     except (KeyError, ValueError, InvalidOperation) as error:
                         raise ValueError("invalid OKX depth update") from error
-                    await self._publish(book)
+                    await self._publish(book, force=is_snapshot)
         if not stop.is_set():
             raise ConnectionError("OKX WebSocket disconnected")
 

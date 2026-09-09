@@ -45,8 +45,10 @@ class _TradeManager:
                 raise
             except (aiohttp.ClientError, OSError, ValueError, KeyError) as error:
                 logger.warning(
-                    "trade_manager_reconnect",
-                    extra={"manager": type(self).__name__, "error": str(error)},
+                    "trade_manager_reconnect: %s (%s): %s",
+                    type(self).__name__,
+                    self._market.value,
+                    error,
                 )
                 await self._sleep_or_stop(stop, delay)
                 delay = min(delay * 2, 30.0)
@@ -162,6 +164,8 @@ class OkxTradeManager(_TradeManager):
                 if message.type is not aiohttp.WSMsgType.TEXT:
                     continue
                 event = _object(message.data)
+                if "event" in event:
+                    continue
                 argument = event.get("arg")
                 records = event.get("data")
                 if not isinstance(argument, dict) or argument.get("channel") != "trades":

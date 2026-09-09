@@ -41,6 +41,11 @@ class LocalOrderBook:
     @property
     def sequence(self) -> int | None:
         return self._sequence
+    @property
+    def symbol(self) -> str:
+        if self._snapshot is None:
+            raise RuntimeError("order book is not bootstrapped")
+        return self._snapshot.symbol
 
     def bootstrap(self, snapshot: SequencedOrderBookSnapshot) -> None:
         self._snapshot = snapshot
@@ -102,10 +107,12 @@ class LocalOrderBook:
         self._apply_levels(self._asks, asks)
         self._sequence = sequence
 
-    def to_model(self, timestamp: int) -> OrderBook:
+    def to_model(self, timestamp: int, *, max_levels: int = 200) -> OrderBook:
         snapshot = self._snapshot
         if snapshot is None or not self._synchronized:
             raise RuntimeError("local order book is not synchronized")
+        bids = self.bids[:max_levels] if max_levels else self.bids
+        asks = self.asks[:max_levels] if max_levels else self.asks
         return OrderBook(
             exchange=snapshot.exchange,
             symbol=snapshot.symbol,
@@ -113,11 +120,11 @@ class LocalOrderBook:
             timestamp=timestamp,
             bids=[
                 PriceLevel(price=float(price), quantity=float(quantity))
-                for price, quantity in self.bids
+                for price, quantity in bids
             ],
             asks=[
                 PriceLevel(price=float(price), quantity=float(quantity))
-                for price, quantity in self.asks
+                for price, quantity in asks
             ],
         )
 

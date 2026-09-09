@@ -22,22 +22,27 @@ class OkxAdapter(ExchangeAdapter):
         self._http_client = http_client
 
     async def discover_markets(self) -> list[MarketInstrument]:
-        spot_payload, swap_payload = await asyncio.gather(
+        spot_result, swap_result = await asyncio.gather(
             self._http_client.get_json(SPOT_INSTRUMENTS_URL),
             self._http_client.get_json(SWAP_INSTRUMENTS_URL),
+            return_exceptions=True,
         )
-        return [
-            *self._parse_spot(spot_payload),
-            *self._parse_swap(swap_payload),
-        ]
+        if isinstance(spot_result, Exception) and isinstance(swap_result, Exception):
+            raise spot_result
+        instruments: list[MarketInstrument] = []
+        if not isinstance(spot_result, Exception):
+            instruments.extend(self._parse_spot(spot_result))
+        if not isinstance(swap_result, Exception):
+            instruments.extend(self._parse_swap(swap_result))
+        return instruments
 
     @staticmethod
     def _data(payload: object) -> list[dict[str, object]]:
-        if (
-            not isinstance(payload, dict)
-            or payload.get("code") != "0"
-            or not isinstance(payload.get("data"), list)
-        ):
+        if not isinstance(payload, dict):
+            raise ValueError("OKX response is not an object")
+        if payload.get("code") == "50011":
+            raise ValueError("OKX rate limit reached (50011)")
+        if payload.get("code") != "0" or not isinstance(payload.get("data"), list):
             raise ValueError("OKX instruments response is invalid")
         return [item for item in payload["data"] if isinstance(item, dict)]
 
@@ -107,7 +112,7 @@ class OkxAdapter(ExchangeAdapter):
             f"https://www.okx.com/api/v5/market/books?instId={instrument.exchange_symbol}&sz=400"
         )
         records = self._data(payload)
-        if len(records) != 1 or not isinstance(records[0].get("seqId"), str):
+        if len(records) != 1 or not isinstance(records[0].get("seqId"), (str, int)):
             raise ValueError("OKX depth snapshot is invalid")
         record = records[0]
         try:

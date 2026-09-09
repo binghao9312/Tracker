@@ -45,20 +45,23 @@ class BinanceDerivativesProvider:
 class OkxDerivativesProvider:
     def __init__(self, http_client: JsonHttpClient) -> None:
         self._http = http_client
+        self._semaphore = asyncio.Semaphore(2)
 
     async def snapshot(self, instrument: MarketInstrument) -> DerivativeSnapshot:
         _require_perpetual(instrument, Exchange.OKX)
-        open_interest, funding, mark_price = await asyncio.gather(
-            self._http.get_json(
-                f"https://www.okx.com/api/v5/public/open-interest?instType=SWAP&instId={instrument.exchange_symbol}"
-            ),
-            self._http.get_json(
-                f"https://www.okx.com/api/v5/public/funding-rate?instId={instrument.exchange_symbol}"
-            ),
-            self._http.get_json(
-                f"https://www.okx.com/api/v5/public/mark-price?instType=SWAP&instId={instrument.exchange_symbol}"
-            ),
-        )
+        async with self._semaphore:
+            await asyncio.sleep(0.05)
+            open_interest, funding, mark_price = await asyncio.gather(
+                self._http.get_json(
+                    f"https://www.okx.com/api/v5/public/open-interest?instType=SWAP&instId={instrument.exchange_symbol}"
+                ),
+                self._http.get_json(
+                    f"https://www.okx.com/api/v5/public/funding-rate?instId={instrument.exchange_symbol}"
+                ),
+                self._http.get_json(
+                    f"https://www.okx.com/api/v5/public/mark-price?instType=SWAP&instId={instrument.exchange_symbol}"
+                ),
+            )
         oi_record = _okx_single_record(open_interest)
         funding_record = _okx_single_record(funding)
         mark_record = _okx_single_record(mark_price)

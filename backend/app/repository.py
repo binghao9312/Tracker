@@ -8,7 +8,7 @@ from decimal import Decimal, InvalidOperation
 from math import isfinite
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import insert, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -33,7 +33,22 @@ class MetricRepository:
 
     async def append_derivative(self, values: Mapping[str, Any]) -> None:
         await self._append(DerivativeMetricRow(**values))
-
+    async def append_batch(
+        self,
+        *,
+        markets: list[Mapping[str, Any]] | None = None,
+        flows: list[Mapping[str, Any]] | None = None,
+        derivatives: list[Mapping[str, Any]] | None = None,
+    ) -> None:
+        if not markets and not flows and not derivatives:
+            return
+        async with self._sessions.begin() as session:
+            if markets:
+                await session.execute(insert(MarketMetricRow), [dict(v) for v in markets])
+            if flows:
+                await session.execute(insert(FlowMetricRow), [dict(v) for v in flows])
+            if derivatives:
+                await session.execute(insert(DerivativeMetricRow), [dict(v) for v in derivatives])
     async def history(self, symbol: str, limit: int = 3_600) -> dict[str, list[dict[str, Any]]]:
         async with self._sessions() as session:
             market = await session.scalars(

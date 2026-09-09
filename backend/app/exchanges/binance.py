@@ -23,14 +23,19 @@ class BinanceAdapter(ExchangeAdapter):
         self._http_client = http_client
 
     async def discover_markets(self) -> list[MarketInstrument]:
-        spot_payload, perp_payload = await asyncio.gather(
+        spot_result, perp_result = await asyncio.gather(
             self._http_client.get_json(SPOT_EXCHANGE_INFO_URL),
             self._http_client.get_json(PERP_EXCHANGE_INFO_URL),
+            return_exceptions=True,
         )
-        return [
-            *self._parse_spot(spot_payload),
-            *self._parse_perp(perp_payload),
-        ]
+        if isinstance(spot_result, Exception) and isinstance(perp_result, Exception):
+            raise spot_result
+        instruments: list[MarketInstrument] = []
+        if not isinstance(spot_result, Exception):
+            instruments.extend(self._parse_spot(spot_result))
+        if not isinstance(perp_result, Exception):
+            instruments.extend(self._parse_perp(perp_result))
+        return instruments
 
     @staticmethod
     def _symbols(payload: object) -> list[dict[str, object]]:
