@@ -26,7 +26,7 @@ type PaperStats = Record<string, unknown> & { total_trades: number; open_trades:
 const number = (value: number | null | undefined, digits = 2) => value == null ? "—" : value.toLocaleString(undefined, { maximumFractionDigits: digits });
 const percent = (value: number | null | undefined) => value == null ? "—" : `${value >= 0 ? "+" : ""}${(value * 100).toFixed(2)}%`;
 const socketUrl = (path: string) => `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${path}`;
-
+type AlertItem = { id: string; symbol: string; time: string; message: string; level: "high" | "confirmed" };
 type SymbolHistory = { market?: { timestamp: string | number; price: number | null }[] };
 
 const scannerColumns = [
@@ -68,7 +68,7 @@ export function App() {
   const [positions, setPositions] = useState<PaperTrade[]>([]);
   const [stats, setStats] = useState<PaperStats | null>(null);
   const [replay, setReplay] = useState<{ trade: PaperTrade; entry_snapshot: Detail; exit_snapshot: Detail | null; history: { market: ChartPoint[] } } | null>(null);
-
+  const [alerts, setAlerts] = useState<AlertItem[]>([]);
   useEffect(() => {
     void fetch("/api/scanner").then(response => response.json()).then(setRows).catch(() => setConnection("OFFLINE"));
     const socket = new WebSocket(socketUrl("/ws/scanner"));
@@ -83,6 +83,19 @@ export function App() {
       }
       const update = message.data as ScannerRow;
       setRows(current => [...current.filter(row => row.symbol !== update.symbol), update]);
+      const score = update.activity_score ?? 0;
+      const isConfirmed = update.cross_exchange_state === "CONFIRMED";
+      if (score >= 60 || isConfirmed) {
+        const timeStr = new Date().toLocaleTimeString();
+        const reason = isConfirmed ? `CONFIRMED ${update.move_type ?? "FLOW"}` : `ACTIVITY ${score.toFixed(1)}`;
+        setAlerts(curr => [{
+          id: `${update.symbol}-${Date.now()}`,
+          symbol: update.symbol,
+          time: timeStr,
+          message: reason,
+          level: isConfirmed ? "confirmed" : "high",
+        }, ...curr.slice(0, 7)]);
+      }
     };
     return () => socket.close();
   }, []);
@@ -135,6 +148,7 @@ export function App() {
   const currentPrices = useMemo(() => Object.fromEntries(rows.filter(row => row.price != null).map(row => [row.symbol, row.price!])), [rows]);
   return <main className="terminal">
     <header className="toolbar"><strong>QTRADE / CEX LIQUIDITY & FLOW</strong><nav><button className={mode === "SCANNER" ? "active" : ""} onClick={() => setMode("SCANNER")}>SCANNER</button><button className={mode === "PAPER" ? "active" : ""} onClick={() => setMode("PAPER")}>PAPER</button></nav><span>BINANCE <i className="online"/> OKX <i className="online"/></span><span className="connection">{connection}</span></header>
+    <div className="alert-bar"><span className="alert-title">ANOMALY ALERTS</span>{alerts.length > 0 ? <div className="alert-ticker">{alerts.map(a => <button key={a.id} className={`alert-chip ${a.level}`} onClick={() => setSelected(a.symbol)}><span className="time">{a.time}</span><strong>{a.symbol}</strong><span>{a.message}</span></button>)}</div> : <span className="alert-empty">Monitoring 44 crypto markets for aggressive volume sweeps and cross-exchange confirmation...</span>}</div>
     {mode === "SCANNER" ? <><section className="scanner"><table><thead><tr>{scannerColumns.map(key => <th key={key} onClick={() => chooseSort(key)}>{key.replaceAll("_", " ")}{sort.key === key ? sort.descending ? " ↓" : " ↑" : ""}</th>)}</tr></thead><tbody>{ordered.map(row => <tr key={row.symbol} className={row.symbol === selected ? "selected" : ""} onClick={() => setSelected(row.symbol)}>{scannerColumns.map(key => <td key={key}>{typeof row[key] === "number" ? number(row[key], 4) : row[key] ?? "—"}</td>)}</tr>)}</tbody></table></section><section className="detail"><DetailPane selected={selected} detail={detail}/><MetricChart data={historyPoints}/></section></> : <PaperPage stats={stats} positions={positions} trades={trades} replay={replay} currentPrices={currentPrices} onReplay={loadReplay} onCloseReplay={() => setReplay(null)}/>}
   </main>;
 }
