@@ -77,3 +77,21 @@ class RuntimePipelineTests(unittest.IsolatedAsyncioTestCase):
         await runtime.start()
         await runtime.stop()
         self.assertEqual(runtime._tasks, [])
+
+    async def test_prune_historical_metrics_delegates_cutoff_to_metrics(self) -> None:
+        state = DashboardState([UniverseAsset(rank=1, symbol="BTC", name="Bitcoin")])
+
+        class PruningMetrics(MemoryMetrics):
+            def __init__(self) -> None:
+                super().__init__()
+                self.pruned_before = None
+
+            async def prune_metrics(self, before: object) -> int:
+                self.pruned_before = before
+                return 42
+
+        metrics = PruningMetrics()
+        runtime = LiveRuntime(state, metrics)
+        count = await runtime.prune_historical_metrics(retention_hours=24)
+        self.assertEqual(count, 42)
+        self.assertIsNotNone(metrics.pruned_before)

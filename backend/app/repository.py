@@ -8,7 +8,7 @@ from decimal import Decimal, InvalidOperation
 from math import isfinite
 from typing import Any
 
-from sqlalchemy import insert, select
+from sqlalchemy import delete, insert, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -49,7 +49,21 @@ class MetricRepository:
                 await session.execute(insert(FlowMetricRow), [dict(v) for v in flows])
             if derivatives:
                 await session.execute(insert(DerivativeMetricRow), [dict(v) for v in derivatives])
-    async def history(self, symbol: str, limit: int = 3_600) -> dict[str, list[dict[str, Any]]]:
+
+    async def prune_metrics(self, before: datetime) -> int:
+        """Delete aggregated metric rows older than the specified retention cutoff."""
+        total_deleted = 0
+        async with self._sessions.begin() as session:
+            for row_type in (MarketMetricRow, FlowMetricRow, DerivativeMetricRow):
+                result = await session.execute(
+                    delete(row_type).where(row_type.timestamp < before)
+                )
+                total_deleted += result.rowcount or 0
+        return total_deleted
+
+    async def history(
+        self, symbol: str, limit: int = 3_600
+    ) -> dict[str, list[dict[str, Any]]]:
         async with self._sessions() as session:
             market = await session.scalars(
                 select(MarketMetricRow)

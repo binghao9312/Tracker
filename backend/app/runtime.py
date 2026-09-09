@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections import defaultdict, deque
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import aiohttp
@@ -41,6 +42,8 @@ from app.scoring import (
     exchange_directions,
     liquidity_fragility_scores,
 )
+
+logger = logging.getLogger(__name__)
 
 _OI_WINDOWS = {
     60: "1m",
@@ -172,12 +175,26 @@ class LiveRuntime:
             derivatives=batch_derivatives,
         )
     async def _run_cadence(self) -> None:
+        cycles = 0
         while not self._stop.is_set():
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=self._cadence_seconds)
             except TimeoutError:
                 self._dirty_symbols.update(symbol for _, symbol, _ in self._books)
                 await self.flush()
+                cycles += 1
+                if cycles % 3600 == 0:
+                    try:
+                        await self.prune_historical_metrics(retention_hours=24)
+                    except Exception as error:
+                        logger.warning("metrics_prune_error: %s", error)
+
+    async def prune_historical_metrics(self, retention_hours: int = 24) -> int:
+        """Prune database timeseries metrics older than retention cutoff."""
+        if not hasattr(self.metrics, "prune_metrics"):
+            return 0
+        cutoff = datetime.now(UTC) - timedelta(hours=retention_hours)
+        return await self.metrics.prune_metrics(cutoff)
     async def _persist_metrics_batch(
         self,
         *,
