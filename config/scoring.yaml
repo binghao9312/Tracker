@@ -23,3 +23,6 @@ paper_trading:
   max_holding_minutes: 60
   fee_bps: 5
   require_cross_exchange_confirmation: false
+
+data_retention:
+  metric_history_days: 30

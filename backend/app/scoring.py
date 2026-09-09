@@ -59,6 +59,31 @@ class ClassificationThresholds:
             raise ValueError("allow_missing_cvd must be a boolean")
 
 
+@dataclass(frozen=True)
+class DataRetentionSettings:
+    metric_history_days: int = 30
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.metric_history_days, bool)
+            or not isinstance(self.metric_history_days, int)
+            or self.metric_history_days < 1
+        ):
+            raise ValueError("metric_history_days must be an integer greater than or equal to 1")
+
+
+def load_data_retention_settings(path: Path) -> DataRetentionSettings:
+    """Load validated metric-retention settings from the scoring configuration."""
+    values = _scoring_section(path, "data_retention")
+    required = {"metric_history_days"}
+    missing = required - values.keys()
+    if missing:
+        raise ValueError(f"data_retention configuration is missing: {', '.join(sorted(missing))}")
+    try:
+        return DataRetentionSettings(**dict(values))
+    except TypeError as exc:
+        raise ValueError("data_retention configuration has unsupported values") from exc
+
 def load_classification_thresholds(path: Path) -> ClassificationThresholds:
     """Load validated classification thresholds from the scoring configuration."""
     values = _scoring_section(path, "classification")

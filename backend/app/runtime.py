@@ -67,6 +67,7 @@ class LiveRuntime:
         session: aiohttp.ClientSession | None = None,
         discovery: MarketDiscoveryService | None = None,
         thresholds: ClassificationThresholds | None = None,
+        metric_history_days: int = 30,
         cadence_seconds: float = 1.0,
     ) -> None:
         self.state = state
@@ -76,6 +77,7 @@ class LiveRuntime:
         self._discovery = discovery
         self._thresholds = thresholds or ClassificationThresholds()
         self._cadence_seconds = cadence_seconds
+        self._retention_hours = metric_history_days * 24
         self._stop = asyncio.Event()
         self._tasks: list[asyncio.Task[None]] = []
         self._books: dict[tuple[Exchange, str, MarketType], OrderBook] = {}
@@ -185,15 +187,15 @@ class LiveRuntime:
                 cycles += 1
                 if cycles % 3600 == 0:
                     try:
-                        await self.prune_historical_metrics(retention_hours=24)
+                        await self.prune_historical_metrics()
                     except Exception as error:
                         logger.warning("metrics_prune_error: %s", error)
 
-    async def prune_historical_metrics(self, retention_hours: int = 24) -> int:
-        """Prune database timeseries metrics older than retention cutoff."""
+    async def prune_historical_metrics(self) -> int:
+        """Prune database timeseries metrics older than the configured retention cutoff."""
         if not hasattr(self.metrics, "prune_metrics"):
             return 0
-        cutoff = datetime.now(UTC) - timedelta(hours=retention_hours)
+        cutoff = datetime.now(UTC) - timedelta(hours=self._retention_hours)
         return await self.metrics.prune_metrics(cutoff)
     async def _persist_metrics_batch(
         self,

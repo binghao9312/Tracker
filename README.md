@@ -14,6 +14,12 @@ docker compose up --build
 
 The backend loads `config/universe.json`, discovers currently live Binance/OKX markets, and uses only public market-data endpoints. Configure `DATABASE_URL` only when using a local non-Compose database. Exchange credentials are never required: no trading or account endpoints are implemented.
 
+## Configuration
+
+`config/scoring.yaml` controls metric scoring and retention. Set
+`data_retention.metric_history_days` to retain aggregated market, flow, and derivative
+metrics for that many days. Default: 30 days.
+
 ## Runtime smoke test
 
 After `docker compose up --build` reports both services ready, wait for public market-data subscriptions to establish and run:

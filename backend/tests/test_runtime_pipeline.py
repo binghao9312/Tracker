@@ -92,6 +92,6 @@ class RuntimePipelineTests(unittest.IsolatedAsyncioTestCase):
 
         metrics = PruningMetrics()
         runtime = LiveRuntime(state, metrics)
-        count = await runtime.prune_historical_metrics(retention_hours=24)
+        count = await runtime.prune_historical_metrics()
         self.assertEqual(count, 42)
         self.assertIsNotNone(metrics.pruned_before)
