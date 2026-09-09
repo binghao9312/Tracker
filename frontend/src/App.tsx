@@ -69,6 +69,7 @@ export function App() {
   const [stats, setStats] = useState<PaperStats | null>(null);
   const [replay, setReplay] = useState<{ trade: PaperTrade; entry_snapshot: Detail; exit_snapshot: Detail | null; history: { market: ChartPoint[] } } | null>(null);
   const [alerts, setAlerts] = useState<AlertItem[]>([]);
+  const [filter, setFilter] = useState("");
   useEffect(() => {
     void fetch("/api/scanner").then(response => response.json()).then(setRows).catch(() => setConnection("OFFLINE"));
     const socket = new WebSocket(socketUrl("/ws/scanner"));
@@ -138,16 +139,20 @@ export function App() {
     return () => socket.close();
   }, [mode]);
 
-  const ordered = useMemo(() => [...rows].sort((left, right) => {
+  const filtered = useMemo(() => {
+    const q = filter.trim().toUpperCase();
+    return q ? rows.filter(r => r.symbol.includes(q)) : rows;
+  }, [rows, filter]);
+  const ordered = useMemo(() => [...filtered].sort((left, right) => {
     const a = left[sort.key] ?? (sort.descending ? -Infinity : Infinity);
     const b = right[sort.key] ?? (sort.descending ? -Infinity : Infinity);
     return (a < b ? -1 : a > b ? 1 : 0) * (sort.descending ? -1 : 1);
-  }), [rows, sort]);
+  }), [filtered, sort]);
   const chooseSort = (key: SortKey) => setSort(current => ({ key, descending: current.key === key ? !current.descending : key !== "symbol" }));
   const loadReplay = (trade: PaperTrade) => void fetch(`/api/paper/trades/${trade.id}`).then(response => response.json()).then(setReplay);
   const currentPrices = useMemo(() => Object.fromEntries(rows.filter(row => row.price != null).map(row => [row.symbol, row.price!])), [rows]);
   return <main className="terminal">
-    <header className="toolbar"><strong>QTRADE / CEX LIQUIDITY & FLOW</strong><nav><button className={mode === "SCANNER" ? "active" : ""} onClick={() => setMode("SCANNER")}>SCANNER</button><button className={mode === "PAPER" ? "active" : ""} onClick={() => setMode("PAPER")}>PAPER</button></nav><span>BINANCE <i className="online"/> OKX <i className="online"/></span><span className="connection">{connection}</span></header>
+    <header className="toolbar"><strong>QTRADE / CEX LIQUIDITY & FLOW</strong><nav><button className={mode === "SCANNER" ? "active" : ""} onClick={() => setMode("SCANNER")}>SCANNER</button><button className={mode === "PAPER" ? "active" : ""} onClick={() => setMode("PAPER")}>PAPER</button></nav><div className="search-box"><input type="text" placeholder="Filter symbol (e.g. BTC)..." value={filter} onChange={e => setFilter(e.target.value)} onKeyDown={e => { if (e.key === "Enter" && ordered.length > 0) setSelected(ordered[0].symbol); else if (e.key === "Escape") setFilter(""); }}/>{filter ? <span className="search-count">{ordered.length}/{rows.length}</span> : null}</div><span>BINANCE <i className="online"/> OKX <i className="online"/></span><span className="connection">{connection}</span></header>
     <div className="alert-bar"><span className="alert-title">ANOMALY ALERTS</span>{alerts.length > 0 ? <div className="alert-ticker">{alerts.map(a => <button key={a.id} className={`alert-chip ${a.level}`} onClick={() => setSelected(a.symbol)}><span className="time">{a.time}</span><strong>{a.symbol}</strong><span>{a.message}</span></button>)}</div> : <span className="alert-empty">Monitoring 44 crypto markets for aggressive volume sweeps and cross-exchange confirmation...</span>}</div>
     {mode === "SCANNER" ? <><section className="scanner"><table><thead><tr>{scannerColumns.map(key => <th key={key} onClick={() => chooseSort(key)}>{key.replaceAll("_", " ")}{sort.key === key ? sort.descending ? " ↓" : " ↑" : ""}</th>)}</tr></thead><tbody>{ordered.map(row => <tr key={row.symbol} className={row.symbol === selected ? "selected" : ""} onClick={() => setSelected(row.symbol)}>{scannerColumns.map(key => <td key={key}>{typeof row[key] === "number" ? number(row[key], 4) : row[key] ?? "—"}</td>)}</tr>)}</tbody></table></section><section className="detail"><DetailPane selected={selected} detail={detail}/><MetricChart data={historyPoints}/></section></> : <PaperPage stats={stats} positions={positions} trades={trades} replay={replay} currentPrices={currentPrices} onReplay={loadReplay} onCloseReplay={() => setReplay(null)}/>}
   </main>;
