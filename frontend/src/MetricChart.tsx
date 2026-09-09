@@ -8,8 +8,18 @@ export function MetricChart({ data, markers = [] }: { data: ChartPoint[]; marker
   const host = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!host.current) return;
-    const chart = createChart(host.current, { height: 220, layout: { background: { type: ColorType.Solid, color: "#10141d" }, textColor: "#9aa7ba" }, grid: { vertLines: { color: "#202938" }, horzLines: { color: "#202938" } } });
-    const series = chart.addSeries(LineSeries, { color: "#42d392", lineWidth: 2 });
+    const chart = createChart(host.current, {
+      height: 250,
+      layout: { background: { type: ColorType.Solid, color: "#10141d" }, textColor: "#9aa7ba" },
+      grid: { vertLines: { color: "#1c2433" }, horzLines: { color: "#1c2433" } },
+      timeScale: { timeVisible: true, secondsVisible: true, borderColor: "#273142" },
+      rightPriceScale: { borderColor: "#273142" },
+    });
+    const series = chart.addSeries(LineSeries, {
+      color: "#42d392",
+      lineWidth: 2,
+      priceFormat: { type: "price", precision: 4, minMove: 0.0001 },
+    });
     const ascendingPoints: { time: UTCTimestamp; value: number }[] = [];
     let lastPointSec = -Infinity;
     for (const point of data) {
