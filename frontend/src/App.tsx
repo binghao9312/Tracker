@@ -25,6 +25,14 @@ type PaperStats = Record<string, unknown> & { total_trades: number; open_trades:
 
 const number = (value: number | null | undefined, digits = 2) => value == null ? "—" : value.toLocaleString(undefined, { maximumFractionDigits: digits });
 const percent = (value: number | null | undefined) => value == null ? "—" : `${value >= 0 ? "+" : ""}${(value * 100).toFixed(2)}%`;
+const formatPrice = (value: number | null | undefined) => {
+  if (value == null) return "—";
+  const abs = Math.abs(value);
+  if (abs === 0) return "0.00";
+  if (abs >= 1) return value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  if (abs >= 0.01) return value.toLocaleString(undefined, { minimumFractionDigits: 4, maximumFractionDigits: 4 });
+  return value.toLocaleString(undefined, { minimumFractionDigits: 6, maximumFractionDigits: 8 });
+};
 const socketUrl = (path: string) => `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${path}`;
 type AlertItem = { id: string; symbol: string; time: string; message: string; level: "high" | "confirmed" };
 type SymbolHistory = { market?: { timestamp: string | number; price: number | null }[] };
@@ -154,7 +162,7 @@ export function App() {
   return <main className="terminal">
     <header className="toolbar"><strong>QTRADE / CEX LIQUIDITY & FLOW</strong><nav><button className={mode === "SCANNER" ? "active" : ""} onClick={() => setMode("SCANNER")}>SCANNER</button><button className={mode === "PAPER" ? "active" : ""} onClick={() => setMode("PAPER")}>PAPER</button></nav><div className="search-box"><input type="text" placeholder="Filter symbol (e.g. BTC)..." value={filter} onChange={e => setFilter(e.target.value)} onKeyDown={e => { if (e.key === "Enter" && ordered.length > 0) setSelected(ordered[0].symbol); else if (e.key === "Escape") setFilter(""); }}/>{filter ? <span className="search-count">{ordered.length}/{rows.length}</span> : null}</div><span>BINANCE <i className="online"/> OKX <i className="online"/></span><span className="connection">{connection}</span></header>
     <div className="alert-bar"><span className="alert-title">ANOMALY ALERTS</span>{alerts.length > 0 ? <div className="alert-ticker">{alerts.map(a => <button key={a.id} className={`alert-chip ${a.level}`} onClick={() => setSelected(a.symbol)}><span className="time">{a.time}</span><strong>{a.symbol}</strong><span>{a.message}</span></button>)}</div> : <span className="alert-empty">Monitoring 44 crypto markets for aggressive volume sweeps and cross-exchange confirmation...</span>}</div>
-    {mode === "SCANNER" ? <><section className="scanner"><table><thead><tr>{scannerColumns.map(key => <th key={key} onClick={() => chooseSort(key)}>{key.replaceAll("_", " ")}{sort.key === key ? sort.descending ? " ↓" : " ↑" : ""}</th>)}</tr></thead><tbody>{ordered.map(row => <tr key={row.symbol} className={row.symbol === selected ? "selected" : ""} onClick={() => setSelected(row.symbol)}>{scannerColumns.map(key => <td key={key}>{typeof row[key] === "number" ? number(row[key], 4) : row[key] ?? "—"}</td>)}</tr>)}</tbody></table></section><section className="detail"><DetailPane selected={selected} detail={detail}/><MetricChart data={historyPoints}/></section></> : <PaperPage stats={stats} positions={positions} trades={trades} replay={replay} currentPrices={currentPrices} onReplay={loadReplay} onCloseReplay={() => setReplay(null)}/>}
+    {mode === "SCANNER" ? <><section className="scanner"><table><thead><tr>{scannerColumns.map(key => <th key={key} onClick={() => chooseSort(key)}>{key.replaceAll("_", " ")}{sort.key === key ? sort.descending ? " ↓" : " ↑" : ""}</th>)}</tr></thead><tbody>{ordered.map(row => <tr key={row.symbol} className={row.symbol === selected ? "selected" : ""} onClick={() => setSelected(row.symbol)}>{scannerColumns.map(key => <td key={key}>{key === "price" ? formatPrice(row.price) : typeof row[key] === "number" ? number(row[key], 4) : row[key] ?? "—"}</td>)}</tr>)}</tbody></table></section><section className="detail"><DetailPane selected={selected} detail={detail}/><MetricChart data={historyPoints}/></section></> : <PaperPage stats={stats} positions={positions} trades={trades} replay={replay} currentPrices={currentPrices} onReplay={loadReplay} onCloseReplay={() => setReplay(null)}/>}
   </main>;
 }
 function DetailPane({ selected, detail }: { selected: string | null; detail: Detail | null }) {
@@ -168,7 +176,7 @@ function DetailPane({ selected, detail }: { selected: string | null; detail: Det
   const moveEx = (detail.move_type_by_exchange ?? {}) as Record<string, string>;
   const dirEx = (detail.exchange_directions ?? {}) as Record<string, string>;
   return <div className="detail-content">
-    <div className="detail-header"><h2>{selected} · {number(detail.price as number, 2)}</h2><div className="detail-tags"><span className="tag">{String(detail.move_type ?? "NEUTRAL")}</span><span className={`tag ${detail.cross_exchange_state === "CONFIRMED" ? "positive" : "negative"}`}>{String(detail.cross_exchange_state ?? "—")}</span></div></div>
+    <div className="detail-header"><h2>{selected} · {formatPrice(detail.price as number)}</h2><div className="detail-tags"><span className="tag">{String(detail.move_type ?? "NEUTRAL")}</span><span className={`tag ${detail.cross_exchange_state === "CONFIRMED" ? "positive" : "negative"}`}>{String(detail.cross_exchange_state ?? "—")}</span></div></div>
     <dl>
       <div><dt>Activity Score</dt><dd>{number(detail.activity_score as number, 2)}</dd></div>
       <div><dt>Liquidity Fragility</dt><dd>{number(detail.liquidity_fragility as number, 2)}</dd></div>
