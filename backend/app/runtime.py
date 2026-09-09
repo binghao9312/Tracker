@@ -214,6 +214,8 @@ class LiveRuntime:
         for market in MarketType:
             market_flows[market] = await self._persist_flow(symbol, market, metrics_by_book)
         for exchange in Exchange:
+            if not any((exchange, market) in metrics_by_book for market in MarketType):
+                continue
             spot = market_flows[MarketType.SPOT]
             perp = market_flows[MarketType.PERP]
             derivative = self._latest_derivative(exchange, symbol)
@@ -223,8 +225,8 @@ class LiveRuntime:
                 spot.get(f"{exchange.value}:sell_pressure_5m"),
                 perp.get(f"{exchange.value}:buy_pressure_5m"),
                 perp.get(f"{exchange.value}:sell_pressure_5m"),
-                float(spot.get(f"{exchange.value}:cvd_5m") or 0),
-                float(perp.get(f"{exchange.value}:cvd_5m") or 0),
+                spot.get(f"{exchange.value}:cvd_5m"),
+                perp.get(f"{exchange.value}:cvd_5m"),
                 self._oi_change(exchange, symbol),
             ))
             if derivative is not None:

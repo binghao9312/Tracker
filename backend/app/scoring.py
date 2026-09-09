@@ -30,9 +30,15 @@ class MarketSignal:
     spot_sell_pressure: float | None
     perp_buy_pressure: float | None
     perp_sell_pressure: float | None
-    spot_cvd: float
-    perp_cvd: float
+    spot_cvd: float | None
+    perp_cvd: float | None
     oi_change: float | None
+
+
+class _Direction(StrEnum):
+    BUY = "BUY"
+    SELL = "SELL"
+    NONE = "NONE"
 
 
 @dataclass(frozen=True)
@@ -43,15 +49,16 @@ class ClassificationThresholds:
 
 
 def classify_move(signal: MarketSignal, thresholds: ClassificationThresholds) -> MoveType:
-    spot_active = _above(signal.spot_buy_pressure, thresholds.pressure) and signal.spot_cvd >= thresholds.cvd
-    perp_active = (
-        _above(signal.perp_buy_pressure, thresholds.pressure)
-        and signal.perp_cvd >= thresholds.cvd
-        and _above(signal.oi_change, thresholds.oi_change)
+    spot_direction = _market_direction(
+        signal.spot_buy_pressure, signal.spot_sell_pressure, signal.spot_cvd, thresholds
     )
-    if spot_active and perp_active:
-        return MoveType.MIXED
-    if spot_active:
+    perp_direction = _market_direction(
+        signal.perp_buy_pressure, signal.perp_sell_pressure, signal.perp_cvd, thresholds
+    )
+    perp_active = perp_direction is not _Direction.NONE and _above(signal.oi_change, thresholds.oi_change)
+    if spot_direction is not _Direction.NONE and perp_active:
+        return MoveType.MIXED if spot_direction is perp_direction else MoveType.NEUTRAL
+    if spot_direction is not _Direction.NONE:
         return MoveType.SPOT_DRIVEN
     if perp_active:
         return MoveType.LEVERAGE_DRIVEN
@@ -61,16 +68,39 @@ def classify_move(signal: MarketSignal, thresholds: ClassificationThresholds) ->
 def cross_exchange_state(signals: list[MarketSignal], thresholds: ClassificationThresholds) -> CrossExchangeState:
     if len(signals) < 2:
         return CrossExchangeState.SINGLE_EXCHANGE
-    active = [
-        max(
-            signal.spot_buy_pressure or 0,
-            signal.spot_sell_pressure or 0,
-            signal.perp_buy_pressure or 0,
-            signal.perp_sell_pressure or 0,
-        ) >= thresholds.pressure
-        for signal in signals
-    ]
-    return CrossExchangeState.CONFIRMED if all(active) else CrossExchangeState.DIVERGENT
+    directions = [_exchange_direction(signal, thresholds) for signal in signals]
+    if directions[0] is not _Direction.NONE and all(
+        direction is directions[0] for direction in directions[1:]
+    ):
+        return CrossExchangeState.CONFIRMED
+    return CrossExchangeState.DIVERGENT
+
+def _exchange_direction(signal: MarketSignal, thresholds: ClassificationThresholds) -> _Direction:
+    directions = {
+        _market_direction(
+            signal.spot_buy_pressure, signal.spot_sell_pressure, signal.spot_cvd, thresholds
+        ),
+        _market_direction(
+            signal.perp_buy_pressure, signal.perp_sell_pressure, signal.perp_cvd, thresholds
+        ),
+    }
+    directions.discard(_Direction.NONE)
+    return directions.pop() if len(directions) == 1 else _Direction.NONE
+
+
+def _market_direction(
+    buy_pressure: float | None,
+    sell_pressure: float | None,
+    cvd: float | None,
+    thresholds: ClassificationThresholds,
+) -> _Direction:
+    buy, sell = buy_pressure or 0, sell_pressure or 0
+    if buy >= thresholds.pressure and buy > sell and (cvd is None or cvd >= thresholds.cvd):
+        return _Direction.BUY
+    if sell >= thresholds.pressure and sell > buy and (cvd is None or cvd <= -thresholds.cvd):
+        return _Direction.SELL
+    return _Direction.NONE
+
 
 
 def liquidity_fragility_score(

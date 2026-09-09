@@ -26,8 +26,8 @@ class ScoringTests(unittest.TestCase):
 
     def test_compares_exchange_confirmation_and_scores_independently(self) -> None:
         signals = [
-            MarketSignal("binance", 3, 0, 0, 0, 0, 0, 0),
-            MarketSignal("okx", 3, 0, 0, 0, 0, 0, 0),
+            MarketSignal("binance", 3, 0, 0, 0, 20, None, 0),
+            MarketSignal("okx", 3, 0, 0, 0, 20, None, 0),
         ]
         self.assertEqual(cross_exchange_state(signals, self.thresholds), CrossExchangeState.CONFIRMED)
         self.assertEqual(

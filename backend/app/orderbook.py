@@ -58,15 +58,9 @@ class LocalOrderBook:
         asks: Iterable[tuple[Decimal, Decimal]],
     ) -> None:
         current_sequence = self._require_sync()
-        is_first_increment = self._snapshot is not None and self._snapshot.sequence == current_sequence
-        if is_first_increment and final_sequence <= current_sequence:
+        if final_sequence <= current_sequence:
             return
-        valid = (
-            first_sequence <= current_sequence + 1 <= final_sequence
-            if is_first_increment
-            else first_sequence == current_sequence + 1
-        )
-        if not valid:
+        if first_sequence > current_sequence + 1:
             self._invalidate("Binance Spot depth sequence gap")
         self._apply_levels(self._bids, bids)
         self._apply_levels(self._asks, asks)
