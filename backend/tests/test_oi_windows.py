@@ -1,4 +1,5 @@
 import unittest
+from time import time_ns
 
 from app.api import DashboardState
 from app.models import DerivativeSnapshot, Exchange, UniverseAsset
@@ -21,6 +22,7 @@ def snapshot(timestamp: int, open_interest: float) -> DerivativeSnapshot:
         exchange=Exchange.BINANCE,
         symbol="BTCUSDT",
         timestamp=timestamp,
+        received_at=time_ns() // 1_000_000,
         open_interest=open_interest,
         open_interest_usd=open_interest * 100,
         funding_rate=None,

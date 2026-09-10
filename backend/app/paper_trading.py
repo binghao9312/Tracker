@@ -198,6 +198,10 @@ class PaperTradingEngine:
             and signal.cross_exchange_state != "CONFIRMED"
         ):
             return []
+        if _execution_book(detail) is None:
+            self._high_since.pop((symbol, TradeBias.LONG), None)
+            self._high_since.pop((symbol, TradeBias.SHORT), None)
+            return []
         key = (symbol, signal.bias)
         since = self._high_since.setdefault(key, now)
         if (now - since).total_seconds() < self.settings.signal_persistence_seconds:

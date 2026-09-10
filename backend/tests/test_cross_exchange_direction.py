@@ -37,11 +37,23 @@ class CrossExchangeDirectionTests(unittest.TestCase):
         )
         self.assertEqual(state, CrossExchangeState.DIVERGENT)
 
-    def test_inactive_exchange_is_divergent(self) -> None:
+    def test_inactive_exchange_is_single_exchange(self) -> None:
         state = cross_exchange_state(
             [self._signal("binance", "BUY"), self._signal("okx", "NONE")], self.thresholds
         )
-        self.assertEqual(state, CrossExchangeState.DIVERGENT)
+        self.assertEqual(state, CrossExchangeState.SINGLE_EXCHANGE)
+
+    def test_inactive_then_sell_is_single_exchange(self) -> None:
+        state = cross_exchange_state(
+            [self._signal("binance", "NONE"), self._signal("okx", "SELL")], self.thresholds
+        )
+        self.assertEqual(state, CrossExchangeState.SINGLE_EXCHANGE)
+
+    def test_inactive_exchanges_are_neutral(self) -> None:
+        state = cross_exchange_state(
+            [self._signal("binance", "NONE"), self._signal("okx", "NONE")], self.thresholds
+        )
+        self.assertEqual(state, CrossExchangeState.NEUTRAL)
 
 
 if __name__ == "__main__":

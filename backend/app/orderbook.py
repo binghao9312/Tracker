@@ -107,7 +107,9 @@ class LocalOrderBook:
         self._apply_levels(self._asks, asks)
         self._sequence = sequence
 
-    def to_model(self, timestamp: int, *, max_levels: int = 200) -> OrderBook:
+    def to_model(
+        self, timestamp: int, *, received_at: int | None = None, max_levels: int = 200
+    ) -> OrderBook:
         snapshot = self._snapshot
         if snapshot is None or not self._synchronized:
             raise RuntimeError("local order book is not synchronized")
@@ -118,6 +120,7 @@ class LocalOrderBook:
             symbol=snapshot.symbol,
             market=snapshot.market,
             timestamp=timestamp,
+            received_at=received_at,
             bids=[
                 PriceLevel(price=float(price), quantity=float(quantity))
                 for price, quantity in bids

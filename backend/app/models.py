@@ -67,7 +67,11 @@ class OrderBook(BaseModel):
     exchange: Exchange
     symbol: str = Field(pattern=r"^[A-Z0-9]+USDT$")
     market: MarketType
+    # Source observation time; retained for persistence and deduplication.
     timestamp: int = Field(ge=0)
+    # Local receive time is independent of the exchange event time for freshness checks.
+    received_at: int | None = Field(default=None, ge=0)
+    available: bool = True
     bids: list[PriceLevel]
     asks: list[PriceLevel]
 
@@ -75,7 +79,9 @@ class OrderBook(BaseModel):
 class DerivativeSnapshot(BaseModel):
     exchange: Exchange
     symbol: str = Field(pattern=r"^[A-Z0-9]+USDT$")
+    # Source observation time; retained for persistence and OI windows.
     timestamp: int = Field(ge=0)
+    received_at: int | None = Field(default=None, ge=0)
     open_interest: float = Field(ge=0)
     open_interest_usd: float = Field(ge=0)
     funding_rate: float | None

@@ -7,7 +7,7 @@ import json
 import logging
 from collections.abc import Awaitable, Callable, Iterable
 from decimal import Decimal, InvalidOperation
-from time import time_ns
+from time import monotonic, time_ns
 
 import aiohttp
 
@@ -19,6 +19,80 @@ from app.orderbook import LocalOrderBook, OrderBookSequenceGap, SequencedOrderBo
 logger = logging.getLogger(__name__)
 OrderBookCallback = Callable[[OrderBook], Awaitable[None]]
 BookEntry = tuple[MarketInstrument, LocalOrderBook]
+
+BINANCE_BOOK_CHUNK_SIZE = 20
+BINANCE_SNAPSHOT_CONCURRENCY = 3
+
+BINANCE_SNAPSHOT_MIN_INTERVAL_SECONDS = 0.25
+SnapshotFetcher = Callable[[], Awaitable[SequencedOrderBookSnapshot]]
+
+
+class BinanceSnapshotScheduler:
+    """Bound and pace every Binance depth bootstrap across all book chunks."""
+
+    def __init__(
+        self,
+        *,
+        concurrency: int = BINANCE_SNAPSHOT_CONCURRENCY,
+        min_interval_seconds: float = BINANCE_SNAPSHOT_MIN_INTERVAL_SECONDS,
+    ) -> None:
+        self._semaphore = asyncio.Semaphore(concurrency)
+        self._min_interval = min_interval_seconds
+        self._lock = asyncio.Lock()
+        self._next_request_at = 0.0
+        self._blocked_until = 0.0
+        self._backoff = 2.0
+
+    async def fetch(self, fetcher: SnapshotFetcher) -> SequencedOrderBookSnapshot:
+        async with self._semaphore:
+            await self._wait_for_turn()
+            try:
+                snapshot = await fetcher()
+            except aiohttp.ClientResponseError as error:
+                await self._report_error(error)
+                raise
+            else:
+                await self._report_success()
+                return snapshot
+
+    async def _wait_for_turn(self) -> None:
+        while True:
+            async with self._lock:
+                now = monotonic()
+                ready_at = max(self._next_request_at, self._blocked_until)
+                if ready_at <= now:
+                    self._next_request_at = now + self._min_interval
+                    return
+                delay = ready_at - now
+            await asyncio.sleep(delay)
+
+    async def _report_success(self) -> None:
+        async with self._lock:
+            if monotonic() >= self._blocked_until:
+                self._backoff = 2.0
+
+    async def _report_error(self, error: aiohttp.ClientResponseError) -> None:
+        if error.status not in (418, 429):
+            return
+        retry_after = _retry_after_seconds(error)
+        async with self._lock:
+            delay = (
+                max(retry_after, 60.0)
+                if error.status == 418
+                else max(retry_after, self._backoff)
+            )
+            self._blocked_until = max(self._blocked_until, monotonic() + delay)
+            if error.status == 429:
+                self._backoff = min(self._backoff * 2, 60.0)
+            logger.warning("binance_snapshot_%s: cooldown=%.1fs", error.status, delay)
+
+
+def _retry_after_seconds(error: aiohttp.ClientResponseError) -> float:
+    raw = error.headers.get("Retry-After") if error.headers else None
+    try:
+        return max(0.0, float(raw)) if raw is not None else 0.0
+    except ValueError:
+        return 0.0
 
 
 class _ResyncingCollector:
@@ -80,7 +154,6 @@ class _OrderBookManager:
             raise ValueError("order book manager instruments must share a market")
         self._on_update = on_update
         self._last_published_ms: dict[str, int] = {}
-
     async def run(self, stop: asyncio.Event) -> None:
         delay = 1.0
         while not stop.is_set():
@@ -90,10 +163,11 @@ class _OrderBookManager:
             except asyncio.CancelledError:
                 raise
             except (aiohttp.ClientError, OSError, ValueError, OrderBookSequenceGap) as error:
+                await self._mark_unavailable()
+                task = asyncio.current_task()
                 logger.warning(
-                    "orderbook_manager_resync: %s (%s): %s",
-                    type(self).__name__,
-                    self._market.value,
+                    "orderbook_chunk_resync: %s: %s",
+                    task.get_name() if task is not None else self._market.value,
                     error,
                 )
                 await self._sleep_or_stop(stop, delay)
@@ -109,14 +183,32 @@ class _OrderBookManager:
         except TimeoutError:
             pass
 
-    async def _publish(self, book: LocalOrderBook, *, force: bool = False) -> None:
-        now_ms = time_ns() // 1_000_000
+    async def _publish(
+        self, book: LocalOrderBook, *, source_timestamp: int, force: bool = False
+    ) -> None:
+        received_at = time_ns() // 1_000_000
         if not force and book.sequence is not None:
             last_ms = self._last_published_ms.get(book.symbol, 0)
-            if now_ms - last_ms < 100:
+            if received_at - last_ms < 100:
                 return
-            self._last_published_ms[book.symbol] = now_ms
-        await self._on_update(book.to_model(now_ms))
+            self._last_published_ms[book.symbol] = received_at
+        await self._on_update(book.to_model(source_timestamp, received_at=received_at))
+
+    async def _mark_unavailable(self) -> None:
+        timestamp = time_ns() // 1_000_000
+        for instrument, _ in self._books.values():
+            await self._on_update(
+                OrderBook(
+                    exchange=instrument.exchange,
+                    symbol=instrument.symbol,
+                    market=instrument.market,
+                    timestamp=timestamp,
+                    received_at=timestamp,
+                    available=False,
+                    bids=[],
+                    asks=[],
+                )
+            )
 
 class BinanceOrderBookManager(_OrderBookManager):
     """Synchronize one Binance market group from a combined depth stream."""
@@ -128,18 +220,31 @@ class BinanceOrderBookManager(_OrderBookManager):
         market: MarketType,
         books: Iterable[BookEntry],
         on_update: OrderBookCallback,
+        snapshot_scheduler: BinanceSnapshotScheduler | None = None,
     ) -> None:
         super().__init__(session, market, books, on_update)
         self._adapter = adapter
+        self._snapshot_scheduler = snapshot_scheduler or BinanceSnapshotScheduler()
 
     async def _bootstrap_all(self) -> None:
         entries = tuple(self._books.values())
-        snapshots = await asyncio.gather(
-            *(self._adapter.fetch_order_book_snapshot(instrument) for instrument, _ in entries)
-        )
-        for (_, book), snapshot in zip(entries, snapshots, strict=True):
+
+        async def fetch(instrument: MarketInstrument, book: LocalOrderBook) -> None:
+            snapshot = await self._snapshot_scheduler.fetch(
+                lambda: self._adapter.fetch_order_book_snapshot(instrument)
+            )
             book.bootstrap(snapshot)
 
+        tasks = [
+            asyncio.create_task(fetch(instrument, book)) for instrument, book in entries
+        ]
+        try:
+            await asyncio.gather(*tasks)
+        except BaseException:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
     async def _synchronize_and_stream(self, stop: asyncio.Event) -> None:
         host = (
             "stream.binance.com:9443" if self._market is MarketType.SPOT else "fstream.binance.com"
@@ -152,7 +257,11 @@ class BinanceOrderBookManager(_OrderBookManager):
         async with self._session.ws_connect(
             f"wss://{host}{path}?streams={streams}", heartbeat=20
         ) as websocket:
-            # The opened socket buffers increments while every book gets a fresh REST baseline.
+            task = asyncio.current_task()
+            logger.info(
+                "orderbook_chunk_connected: %s",
+                task.get_name() if task is not None else self._market.value,
+            )
             await self._bootstrap_all()
             first_increment = {exchange_symbol: True for exchange_symbol in self._books}
             async for message in websocket:
@@ -172,7 +281,7 @@ class BinanceOrderBookManager(_OrderBookManager):
                 entry = self._books.get(exchange_symbol)
                 if entry is None:
                     continue
-                instrument, book = entry
+                _instrument, book = entry
                 try:
                     final_sequence = _integer(event, "u")
                     if book.sequence is not None and final_sequence <= book.sequence:
@@ -194,11 +303,20 @@ class BinanceOrderBookManager(_OrderBookManager):
                             bids=_depth_levels(event.get("b")),
                             asks=_depth_levels(event.get("a")),
                         )
+                    source_timestamp = (
+                        _integer(event, "E")
+                        if "E" in event
+                        else _integer(event, "T")
+                        if "T" in event
+                        else time_ns() // 1_000_000
+                    )
                 except (KeyError, ValueError, InvalidOperation) as error:
                     raise ValueError("invalid Binance depth update") from error
                 is_initial = first_increment[exchange_symbol]
                 first_increment[exchange_symbol] = False
-                await self._publish(book, force=is_initial)
+                await self._publish(
+                    book, source_timestamp=source_timestamp, force=is_initial
+                )
         if not stop.is_set():
             raise ConnectionError("Binance WebSocket disconnected")
 
@@ -240,6 +358,11 @@ class OkxOrderBookManager(_OrderBookManager):
         async with self._session.ws_connect(
             "wss://ws.okx.com:8443/ws/v5/public", heartbeat=20
         ) as websocket:
+            task = asyncio.current_task()
+            logger.info(
+                "orderbook_chunk_connected: %s",
+                task.get_name() if task is not None else self._market.value,
+            )
             await websocket.send_json(
                 {
                     "op": "subscribe",
@@ -249,7 +372,6 @@ class OkxOrderBookManager(_OrderBookManager):
                     ],
                 }
             )
-            # Subscription snapshots are ignored: REST is the baseline for this attempt.
             await self._bootstrap_all()
             async for message in websocket:
                 if stop.is_set():
@@ -298,6 +420,11 @@ class OkxOrderBookManager(_OrderBookManager):
                             update.get("asks"),
                             quantity_multiplier=instrument.base_quantity_multiplier,
                         )
+                        source_timestamp = (
+                            _integer(update, "ts")
+                            if "ts" in update
+                            else time_ns() // 1_000_000
+                        )
                         if is_snapshot:
                             book.bootstrap(
                                 SequencedOrderBookSnapshot(
@@ -305,7 +432,7 @@ class OkxOrderBookManager(_OrderBookManager):
                                     symbol=instrument.symbol,
                                     market=instrument.market,
                                     sequence=sequence,
-                                    timestamp=_integer(update, "ts"),
+                                    timestamp=source_timestamp,
                                     bids=bids,
                                     asks=asks,
                                 )
@@ -319,7 +446,9 @@ class OkxOrderBookManager(_OrderBookManager):
                             )
                     except (KeyError, ValueError, InvalidOperation) as error:
                         raise ValueError("invalid OKX depth update") from error
-                    await self._publish(book, force=is_snapshot)
+                    await self._publish(
+                        book, source_timestamp=source_timestamp, force=is_snapshot
+                    )
         if not stop.is_set():
             raise ConnectionError("OKX WebSocket disconnected")
 

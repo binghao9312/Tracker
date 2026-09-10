@@ -7,9 +7,14 @@ from unittest.mock import patch
 import aiohttp
 
 from app.api import DashboardState
-from app.collectors.orderbooks import BinanceOrderBookManager, OkxOrderBookManager
+from app.collectors.orderbooks import (
+    BinanceOrderBookManager,
+    BinanceSnapshotScheduler,
+    OkxOrderBookManager,
+)
 from app.collectors.trades import BinanceTradeManager, OkxTradeManager
 from app.discovery import DiscoveryResult
+from app.exchanges.binance import BinanceAdapter
 from app.exchanges.okx import OkxAdapter
 from app.models import Exchange, MarketInstrument, MarketType, NormalizedTrade, UniverseAsset
 from app.orderbook import LocalOrderBook, OrderBookSequenceGap, SequencedOrderBookSnapshot
@@ -79,7 +84,7 @@ class SnapshotAdapter:
         sequence = self.sequences[self.calls]
         self.calls += 1
         return SequencedOrderBookSnapshot(
-            exchange=Exchange.OKX,
+            exchange=market.exchange,
             symbol=market.symbol,
             market=market.market,
             sequence=sequence,
@@ -135,6 +140,88 @@ class MultiplexManagerRegressionTests(unittest.IsolatedAsyncioTestCase):
 
                 self.assertEqual(book_session.urls, [depth_url])
                 self.assertEqual(trade_session.urls, [trade_url])
+
+    async def test_binance_gap_marks_chunk_unavailable_until_recovery(self) -> None:
+        btc = instrument(
+            "BTCUSDT",
+            "BTCUSDT",
+            exchange=Exchange.BINANCE,
+            market=MarketType.PERP,
+        )
+        stop = asyncio.Event()
+        published = []
+        first = FakeWebSocket(
+            [
+                message(
+                    {
+                        "data": {
+                            "e": "depthUpdate",
+                            "E": 1_000,
+                            "s": "BTCUSDT",
+                            "U": 100,
+                            "u": 101,
+                            "pu": 99,
+                            "b": [["99", "2"]],
+                            "a": [["100", "2"]],
+                        }
+                    }
+                ),
+                message(
+                    {
+                        "data": {
+                            "e": "depthUpdate",
+                            "E": 1_001,
+                            "s": "BTCUSDT",
+                            "U": 102,
+                            "u": 102,
+                            "pu": 999,
+                            "b": [],
+                            "a": [],
+                        }
+                    }
+                ),
+            ]
+        )
+        recovered = FakeWebSocket(
+            [
+                message(
+                    {
+                        "data": {
+                            "e": "depthUpdate",
+                            "E": 2_000,
+                            "s": "BTCUSDT",
+                            "U": 200,
+                            "u": 201,
+                            "pu": 199,
+                            "b": [["99", "3"]],
+                            "a": [["100", "3"]],
+                        }
+                    }
+                )
+            ]
+        )
+
+        async def on_book(book: object) -> None:
+            published.append(book)
+            if len(published) == 3:
+                stop.set()
+
+        manager = BinanceOrderBookManager(
+            FakeSession([first, recovered]),
+            SnapshotAdapter([100, 200]),
+            MarketType.PERP,
+            [(btc, LocalOrderBook())],
+            on_book,
+        )
+
+        async def skip_backoff(_: asyncio.Event, __: float) -> None:
+            return None
+
+        manager._sleep_or_stop = skip_backoff
+        await manager.run(stop)
+
+        self.assertEqual([book.available for book in published], [True, False, True])
+        self.assertEqual([book.timestamp for book in published if book.available], [1_000, 2_000])
 
     async def test_one_trade_and_book_connection_routes_multiple_instruments(self) -> None:
         btc, eth = instrument("BTCUSDT", "BTC-USDT-SWAP"), instrument("ETHUSDT", "ETH-USDT-SWAP")
@@ -314,6 +401,86 @@ class MultiplexManagerRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(published[0].bids[0].quantity, 2.5)
 
 
+    async def test_binance_snapshot_bootstrap_limits_concurrency(self) -> None:
+        active = 0
+        peak = 0
+
+        class SlowSnapshotAdapter:
+            async def fetch_order_book_snapshot(
+                self, market: MarketInstrument
+            ) -> SequencedOrderBookSnapshot:
+                nonlocal active, peak
+                active += 1
+                peak = max(peak, active)
+                await asyncio.sleep(0)
+                active -= 1
+                return SequencedOrderBookSnapshot(
+                    exchange=market.exchange,
+                    symbol=market.symbol,
+                    market=market.market,
+                    sequence=1,
+                    timestamp=1,
+                    bids=[],
+                    asks=[],
+                )
+
+        books = [
+            (
+                instrument(
+                    f"ASSET{index}USDT",
+                    f"ASSET{index}USDT",
+                    exchange=Exchange.BINANCE,
+                ),
+                LocalOrderBook(),
+            )
+            for index in range(10)
+        ]
+
+        async def ignore_book(_: object) -> None:
+            return None
+
+        manager = BinanceOrderBookManager(
+            object(),
+            SlowSnapshotAdapter(),
+            MarketType.PERP,
+            books,
+            ignore_book,
+            snapshot_scheduler=BinanceSnapshotScheduler(min_interval_seconds=0),
+        )
+
+        await manager._bootstrap_all()
+
+        self.assertLessEqual(peak, 3)
+
+    async def test_binance_snapshot_waiters_observe_shared_cooldown(self) -> None:
+        scheduler = BinanceSnapshotScheduler(min_interval_seconds=0.01)
+        scheduler._backoff = 0.03
+        started: list[float] = []
+
+        async def request(index: int) -> None:
+            async def response() -> SequencedOrderBookSnapshot:
+                started.append(asyncio.get_running_loop().time())
+                if index == 0:
+                    await scheduler._report_error(
+                        SimpleNamespace(status=429, headers={"Retry-After": "0.03"})
+                    )
+                return SequencedOrderBookSnapshot(
+                    exchange=Exchange.BINANCE,
+                    symbol=f"ASSET{index}USDT",
+                    market=MarketType.PERP,
+                    sequence=index,
+                    timestamp=index,
+                    bids=[],
+                    asks=[],
+                )
+
+            await scheduler.fetch(response)
+
+        await asyncio.gather(*(request(index) for index in range(3)))
+
+        self.assertGreaterEqual(started[1] - started[0], 0.025)
+
+
 class PopulatedDiscovery:
     async def discover(self, _: object) -> DiscoveryResult:
         markets = []
@@ -403,6 +570,59 @@ class RuntimeMultiplexTaskRegressionTests(unittest.IsolatedAsyncioTestCase):
                     [f"ASSET{index}-USDT" for index in range(25, 50)],
                 ],
             )
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def test_binance_book_managers_chunk_fifty_instruments_at_twenty(self) -> None:
+        instruments = [
+            instrument(
+                f"ASSET{index}USDT",
+                f"ASSET{index}USDT",
+                exchange=Exchange.BINANCE,
+                market=MarketType.PERP,
+            )
+            for index in range(50)
+        ]
+        chunks: list[list[tuple[MarketInstrument, LocalOrderBook]]] = []
+
+        class RecordingBinanceOrderBookManager:
+            def __init__(
+                self,
+                _: object,
+                __: object,
+                ___: MarketType,
+                books: list[tuple[MarketInstrument, LocalOrderBook]],
+                ____: object,
+                **kwargs: object,
+            ) -> None:
+                chunks.append(books)
+
+            async def run(self, stop: asyncio.Event) -> None:
+                await stop.wait()
+
+        runtime = LiveRuntime(DashboardState([]), object(), session=object())
+        with patch(
+            "app.runtime.BinanceOrderBookManager", RecordingBinanceOrderBookManager
+        ):
+            tasks = runtime._stream_tasks(
+                Exchange.BINANCE,
+                MarketType.PERP,
+                instruments,
+                {Exchange.BINANCE: BinanceAdapter(object())},
+            )
+        try:
+            self.assertEqual(
+                [task.get_name() for task in tasks],
+                [
+                    "trades:binance:perp",
+                    "book:binance:perp:0",
+                    "book:binance:perp:1",
+                    "book:binance:perp:2",
+                ],
+            )
+            self.assertEqual([len(chunk) for chunk in chunks], [20, 20, 10])
         finally:
             for task in tasks:
                 task.cancel()

@@ -24,6 +24,7 @@ class MoveType(StrEnum):
 class CrossExchangeState(StrEnum):
     CONFIRMED = "CONFIRMED"
     DIVERGENT = "DIVERGENT"
+    NEUTRAL = "NEUTRAL"
     SINGLE_EXCHANGE = "SINGLE_EXCHANGE"
 
 
@@ -139,12 +140,15 @@ def classify_move(signal: MarketSignal, thresholds: ClassificationThresholds) ->
 def cross_exchange_state(
     signals: list[MarketSignal], thresholds: ClassificationThresholds
 ) -> CrossExchangeState:
+    directions = [_exchange_direction(signal, thresholds) for signal in signals]
+    active = [direction for direction in directions if direction is not _Direction.NONE]
     if len(signals) < 2:
         return CrossExchangeState.SINGLE_EXCHANGE
-    directions = [_exchange_direction(signal, thresholds) for signal in signals]
-    if directions[0] is not _Direction.NONE and all(
-        direction is directions[0] for direction in directions[1:]
-    ):
+    if not active:
+        return CrossExchangeState.NEUTRAL
+    if len(active) < 2:
+        return CrossExchangeState.SINGLE_EXCHANGE
+    if len(active) == len(directions) and len(set(active)) == 1:
         return CrossExchangeState.CONFIRMED
     return CrossExchangeState.DIVERGENT
 

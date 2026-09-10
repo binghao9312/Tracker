@@ -44,6 +44,19 @@ class PaperTradingRegressionTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.gather(*(engine.process_update("BTCUSDT", detail(), now) for _ in range(8)))
         self.assertEqual(len(repository.rows), 1)
 
+    async def test_unavailable_depth_cannot_open_a_trade(self) -> None:
+        repository = MemoryPaperRepository()
+        engine = PaperTradingEngine(repository, PaperTradingSettings(signal_persistence_seconds=0))
+        unavailable = detail()
+        unavailable["orderbooks"] = {"binance": {"perp": None}}
+
+        events = await engine.process_update(
+            "BTCUSDT", unavailable, datetime(2025, 1, 1, tzinfo=UTC)
+        )
+
+        self.assertFalse(any(event["type"] == "OPEN" for event in events))
+        self.assertEqual(repository.rows, {})
+
     async def test_recovery_restores_recent_close_cooldown(self) -> None:
         repository = MemoryPaperRepository()
         now = datetime(2025, 1, 1, tzinfo=UTC)
