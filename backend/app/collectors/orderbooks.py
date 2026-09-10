@@ -284,8 +284,15 @@ class BinanceOrderBookManager(_OrderBookManager):
                 _instrument, book = entry
                 try:
                     final_sequence = _integer(event, "u")
-                    if book.sequence is not None and final_sequence <= book.sequence:
-                        continue
+                    current_sequence = book.sequence
+                    if current_sequence is not None:
+                        already_applied = (
+                            final_sequence <= current_sequence
+                            if self._market is MarketType.SPOT
+                            else final_sequence < current_sequence
+                        )
+                        if already_applied:
+                            continue
                     if self._market is MarketType.SPOT:
                         book.apply_binance_spot_update(
                             first_sequence=_integer(event, "U"),

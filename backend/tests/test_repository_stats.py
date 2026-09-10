@@ -24,7 +24,7 @@ class RepositoryStatsRegressionTests(unittest.IsolatedAsyncioTestCase):
                 "entry_liquidity_fragility": Decimal("25"),
                 "side": "LONG",
                 "entry_move_type": "MIXED",
-                "entry_cross_exchange_state": "CONFIRMED",
+                "entry_cross_exchange_state": "NEUTRAL",
                 "holding_seconds": 1.0,
                 "max_favorable_excursion_pct": 0.1,
                 "max_adverse_excursion_pct": -0.1,
@@ -51,4 +51,5 @@ class RepositoryStatsRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stats["breakdowns"]["activity_score"]["95-100"]["trades"], 1)
         self.assertEqual(stats["breakdowns"]["liquidity_fragility"]["25-50"]["trades"], 1)
         self.assertEqual(stats["breakdowns"]["liquidity_fragility"]["75-100"]["trades"], 1)
+        self.assertEqual(stats["breakdowns"]["cross_exchange"]["NEUTRAL"]["trades"], 1)
         self.assertEqual(stats["net_pnl"], 1.0)

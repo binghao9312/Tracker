@@ -19,41 +19,30 @@ class CrossExchangeDirectionTests(unittest.TestCase):
             return MarketSignal(exchange, 1.0, 3.0, None, None, -1.0, None, None)
         return MarketSignal(exchange, 0.0, 0.0, None, None, 0.0, None, None)
 
-    def test_same_buy_direction_is_confirmed(self) -> None:
-        state = cross_exchange_state(
-            [self._signal("binance", "BUY"), self._signal("okx", "BUY")], self.thresholds
+    def test_direction_table(self) -> None:
+        cases = (
+            ("BUY", "BUY", CrossExchangeState.CONFIRMED),
+            ("SELL", "SELL", CrossExchangeState.CONFIRMED),
+            ("BUY", "SELL", CrossExchangeState.DIVERGENT),
+            ("SELL", "BUY", CrossExchangeState.DIVERGENT),
+            ("NONE", "NONE", CrossExchangeState.NEUTRAL),
+            ("NONE", "BUY", CrossExchangeState.SINGLE_EXCHANGE),
+            ("NONE", "SELL", CrossExchangeState.SINGLE_EXCHANGE),
+            ("BUY", "NONE", CrossExchangeState.SINGLE_EXCHANGE),
+            ("SELL", "NONE", CrossExchangeState.SINGLE_EXCHANGE),
         )
-        self.assertEqual(state, CrossExchangeState.CONFIRMED)
 
-    def test_same_sell_direction_is_confirmed(self) -> None:
-        state = cross_exchange_state(
-            [self._signal("binance", "SELL"), self._signal("okx", "SELL")], self.thresholds
-        )
-        self.assertEqual(state, CrossExchangeState.CONFIRMED)
+        for binance, okx, expected in cases:
+            with self.subTest(binance=binance, okx=okx):
+                state = cross_exchange_state(
+                    [self._signal("binance", binance), self._signal("okx", okx)],
+                    self.thresholds,
+                )
+                self.assertEqual(state, expected)
 
-    def test_opposite_directions_are_divergent(self) -> None:
-        state = cross_exchange_state(
-            [self._signal("binance", "BUY"), self._signal("okx", "SELL")], self.thresholds
-        )
-        self.assertEqual(state, CrossExchangeState.DIVERGENT)
-
-    def test_inactive_exchange_is_single_exchange(self) -> None:
-        state = cross_exchange_state(
-            [self._signal("binance", "BUY"), self._signal("okx", "NONE")], self.thresholds
-        )
+    def test_only_one_available_exchange_is_single_exchange(self) -> None:
+        state = cross_exchange_state([self._signal("binance", "BUY")], self.thresholds)
         self.assertEqual(state, CrossExchangeState.SINGLE_EXCHANGE)
-
-    def test_inactive_then_sell_is_single_exchange(self) -> None:
-        state = cross_exchange_state(
-            [self._signal("binance", "NONE"), self._signal("okx", "SELL")], self.thresholds
-        )
-        self.assertEqual(state, CrossExchangeState.SINGLE_EXCHANGE)
-
-    def test_inactive_exchanges_are_neutral(self) -> None:
-        state = cross_exchange_state(
-            [self._signal("binance", "NONE"), self._signal("okx", "NONE")], self.thresholds
-        )
-        self.assertEqual(state, CrossExchangeState.NEUTRAL)
 
 
 if __name__ == "__main__":

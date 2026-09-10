@@ -157,6 +157,96 @@ class RuntimePipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(detail["perp"]["buy_pressure_5m"])
         self.assertIsNone(metrics.flow[0]["buy_pressure_5m"])
 
+    async def test_stale_flow_is_excluded_from_aggregate_pressure(self) -> None:
+        state = DashboardState([UniverseAsset(rank=1, symbol="BTC", name="Bitcoin")])
+        metrics = MemoryMetrics()
+        runtime = LiveRuntime(state, metrics)
+        now_ms = time_ns() // 1_000_000
+        await runtime.on_order_book(
+            OrderBook(
+                exchange=Exchange.BINANCE,
+                symbol="BTCUSDT",
+                market=MarketType.PERP,
+                timestamp=now_ms - 11_000,
+                received_at=now_ms - 11_000,
+                bids=[PriceLevel(price=99, quantity=100)],
+                asks=[PriceLevel(price=101, quantity=100)],
+            )
+        )
+        await runtime.on_order_book(
+            OrderBook(
+                exchange=Exchange.OKX,
+                symbol="BTCUSDT",
+                market=MarketType.PERP,
+                timestamp=now_ms,
+                received_at=now_ms,
+                bids=[PriceLevel(price=99, quantity=1)],
+                asks=[PriceLevel(price=101, quantity=1)],
+            )
+        )
+        for trade in (
+            NormalizedTrade(
+                exchange=Exchange.BINANCE,
+                symbol="BTCUSDT",
+                market=MarketType.PERP,
+                timestamp=now_ms,
+                price=101,
+                quantity=1,
+                quote_value=101,
+                side="BUY",
+            ),
+            NormalizedTrade(
+                exchange=Exchange.BINANCE,
+                symbol="BTCUSDT",
+                market=MarketType.PERP,
+                timestamp=now_ms,
+                price=99,
+                quantity=2,
+                quote_value=198,
+                side="SELL",
+            ),
+            NormalizedTrade(
+                exchange=Exchange.OKX,
+                symbol="BTCUSDT",
+                market=MarketType.PERP,
+                timestamp=now_ms,
+                price=101,
+                quantity=2,
+                quote_value=202,
+                side="BUY",
+            ),
+            NormalizedTrade(
+                exchange=Exchange.OKX,
+                symbol="BTCUSDT",
+                market=MarketType.PERP,
+                timestamp=now_ms,
+                price=99,
+                quantity=2,
+                quote_value=198,
+                side="SELL",
+            ),
+        ):
+            await runtime.on_trade(trade)
+
+        await runtime.flush()
+
+        detail = state.detail("BTCUSDT")
+        self.assertEqual(detail["perp"]["cvd_1m"], -93)
+        self.assertEqual(detail["perp"]["cvd_5m"], -93)
+        for window in ("1m", "5m"):
+            self.assertEqual(detail["perp"][f"buy_pressure_{window}"], 2)
+            self.assertEqual(detail["perp"][f"sell_pressure_{window}"], 2)
+        binance_flow = next(flow for flow in metrics.flow if flow["exchange"] == "binance")
+        okx_flow = next(flow for flow in metrics.flow if flow["exchange"] == "okx")
+        for key in (
+            "buy_pressure_1m",
+            "buy_pressure_5m",
+            "sell_pressure_1m",
+            "sell_pressure_5m",
+        ):
+            self.assertIsNone(binance_flow[key])
+            self.assertEqual(okx_flow[key], 2)
+
     async def test_derivative_persistence_uses_source_timestamp_watermark(self) -> None:
         state = DashboardState([UniverseAsset(rank=1, symbol="BTC", name="Bitcoin")])
         metrics = MemoryMetrics()

@@ -29,7 +29,7 @@ curl http://localhost:8001/api/scanner
 curl http://localhost:8001/api/paper/positions
 ```
 
-Expected result: the scanner response becomes a JSON array of monitored symbols with live `price`, `activity_score`, and `liquidity_fragility`; paper positions remains an empty JSON array until the configured local simulator opens a position. The runtime uses only public Binance and OKX market-data endpoints, persists normalized metrics once per second, and never submits an order.
+Expected result: the scanner response becomes a JSON array of monitored symbols with live `price`, `activity_score`, and `liquidity_fragility`; paper positions remains an empty JSON array until the configured local simulator opens a position. The runtime uses only public Binance and OKX market-data endpoints and refreshes dashboard state once per second. Flow history follows that cadence, while order-book and derivative history is written only for new, fresh source observations; stale exchange inputs remain unavailable and cannot trigger paper entries. The simulator never submits an order.
 
 ## Development checks
 

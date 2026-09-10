@@ -223,6 +223,70 @@ class MultiplexManagerRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([book.available for book in published], [True, False, True])
         self.assertEqual([book.timestamp for book in published if book.available], [1_000, 2_000])
 
+    async def test_binance_futures_keeps_event_matching_snapshot_sequence(self) -> None:
+        btc = instrument(
+            "BTCUSDT",
+            "BTCUSDT",
+            exchange=Exchange.BINANCE,
+            market=MarketType.PERP,
+        )
+        stop = asyncio.Event()
+        published = []
+        socket = FakeWebSocket(
+            [
+                message(
+                    {
+                        "data": {
+                            "e": "depthUpdate",
+                            "E": 1_000,
+                            "s": "BTCUSDT",
+                            "U": 99,
+                            "u": 100,
+                            "pu": 98,
+                            "b": [["99", "2"]],
+                            "a": [["100", "2"]],
+                        }
+                    }
+                ),
+                message(
+                    {
+                        "data": {
+                            "e": "depthUpdate",
+                            "E": 1_001,
+                            "s": "BTCUSDT",
+                            "U": 101,
+                            "u": 101,
+                            "pu": 100,
+                            "b": [["99", "3"]],
+                            "a": [["100", "3"]],
+                        }
+                    }
+                ),
+            ]
+        )
+
+        async def on_book(book: object) -> None:
+            published.append(book)
+            if len(published) == 2:
+                stop.set()
+
+        manager = BinanceOrderBookManager(
+            FakeSession([socket]),
+            SnapshotAdapter([100]),
+            MarketType.PERP,
+            [(btc, LocalOrderBook())],
+            on_book,
+        )
+
+        with patch(
+            "app.collectors.orderbooks.time_ns",
+            side_effect=(1_000_000_000, 1_100_000_000),
+        ):
+            await manager._synchronize_and_stream(stop)
+
+        self.assertEqual([book.timestamp for book in published], [1_000, 1_001])
+        self.assertEqual(published[-1].bids[0].quantity, 3)
+
     async def test_one_trade_and_book_connection_routes_multiple_instruments(self) -> None:
         btc, eth = instrument("BTCUSDT", "BTC-USDT-SWAP"), instrument("ETHUSDT", "ETH-USDT-SWAP")
         received_trades: list[NormalizedTrade] = []

@@ -630,6 +630,9 @@ class LiveRuntime:
             "cvd_5m",
         )
         combined: dict[str, float | None] = {key: None for key in aggregate_keys}
+        pressure_volumes: dict[str, float | None] = {
+            key: None for key in aggregate_keys[:4]
+        }
         for exchange in Exchange:
             flow = self._flows.get((exchange, symbol, market))
             liquidity = liquidities.get((exchange, market))
@@ -686,12 +689,25 @@ class LiveRuntime:
                 if key in combined and value is not None:
                     combined[key] = float(combined[key] or 0) + float(value)
                 combined[f"{exchange.value}:{key}"] = value
+            if liquidity is not None:
+                for key in pressure_volumes:
+                    pressure_volumes[key] = float(pressure_volumes[key] or 0) + float(
+                        values[key]
+                    )
         depth_ask = self._depth_for_market(symbol, market, "ask", liquidities=liquidities)
         depth_bid = self._depth_for_market(symbol, market, "bid", liquidities=liquidities)
-        combined["buy_pressure_1m"] = self._ratio(combined["buy_volume_1m"], depth_ask)
-        combined["buy_pressure_5m"] = self._ratio(combined["buy_volume_5m"], depth_ask)
-        combined["sell_pressure_1m"] = self._ratio(combined["sell_volume_1m"], depth_bid)
-        combined["sell_pressure_5m"] = self._ratio(combined["sell_volume_5m"], depth_bid)
+        combined["buy_pressure_1m"] = self._ratio(
+            pressure_volumes["buy_volume_1m"], depth_ask
+        )
+        combined["buy_pressure_5m"] = self._ratio(
+            pressure_volumes["buy_volume_5m"], depth_ask
+        )
+        combined["sell_pressure_1m"] = self._ratio(
+            pressure_volumes["sell_volume_1m"], depth_bid
+        )
+        combined["sell_pressure_5m"] = self._ratio(
+            pressure_volumes["sell_volume_5m"], depth_bid
+        )
         return combined
 
     def _preferred_price(

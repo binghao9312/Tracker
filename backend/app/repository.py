@@ -277,7 +277,7 @@ class PaperTradeRepository:
                 "cross_exchange": _groups(
                     closed,
                     "entry_cross_exchange_state",
-                    ["CONFIRMED", "DIVERGENT", "SINGLE_EXCHANGE"],
+                    ["CONFIRMED", "DIVERGENT", "NEUTRAL", "SINGLE_EXCHANGE"],
                 ),
             },
         }
