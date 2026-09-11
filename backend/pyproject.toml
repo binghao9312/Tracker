@@ -21,6 +21,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+research = [
+  "numpy>=2,<3",
+]
 dev = [
   # Pydantic-maintained TestClient dependency.
   "httpx2>=2.12,<3",
