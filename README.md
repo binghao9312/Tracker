@@ -48,6 +48,18 @@ curl http://localhost:8001/api/paper/positions
 
 Expected result: the scanner response becomes a JSON array of monitored symbols with live `price`, `activity_score`, and `liquidity_fragility`; paper positions remains an empty JSON array until the configured local simulator opens a position. The runtime uses only public Binance and OKX market-data endpoints and refreshes dashboard state once per second. Flow history follows that cadence, while order-book and derivative history is written only for new, fresh source observations; stale exchange inputs remain unavailable and cannot trigger paper entries. The simulator never submits an order.
 
+## Replay backtest
+
+Run the replay from `backend/` after the runtime has persisted `signal_metrics`:
+
+```sh
+DATABASE_URL=... ./.venv/Scripts/python -m research.replay --symbol BTCUSDT --hours 6
+```
+
+Replay sends persisted normalized cadences through the real paper-trading engine. Its
+reported fill model is `synthesized single-level book from persisted mid/spread/depth_2`:
+historical aggregate depth caps fills, but is not a historical order book.
+
 ## Development checks
 
 ```sh

@@ -185,11 +185,9 @@ class ReplayOutcomeTests(unittest.IsolatedAsyncioTestCase):
         # trades that the live engine would never have taken, and every one of them
         # lands in win_rate and profit_factor.
         rows = [snapshot(second, 100.0) for second in range(0, 8)]
-        rows.append(snapshot(8, 105.0))          # closes on take-profit, starts cooldown
+        rows.append(snapshot(8, 105.0))  # closes on take-profit, starts cooldown
         rows += [snapshot(600 + second, 100.0) for second in range(0, 8)]  # after a gap
-        result = await replay(
-            rows, settings(cooldown_minutes=60), max_gap_seconds=5.0
-        )
+        result = await replay(rows, settings(cooldown_minutes=60), max_gap_seconds=5.0)
         self.assertGreaterEqual(result.gaps, 1)
         # The cooldown still had ~50 minutes to run, so no second trade may open.
         self.assertEqual(len(result.trades), 1)
