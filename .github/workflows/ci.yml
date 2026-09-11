@@ -18,7 +18,7 @@ jobs:
           cache: pip
           cache-dependency-path: backend/pyproject.toml
       - run: python -m pip install --upgrade pip
-      - run: python -m pip install -e ".[dev]"
+      - run: python -m pip install -e ".[dev,research]"
       - run: python -m pytest
       - run: ruff check .
       - run: ruff format --check .
