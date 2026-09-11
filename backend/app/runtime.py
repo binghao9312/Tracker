@@ -242,12 +242,14 @@ class LiveRuntime:
         batch_markets: list[dict[str, Any]] = []
         batch_flows: list[dict[str, Any]] = []
         batch_derivatives: list[dict[str, Any]] = []
+        batch_signals: list[dict[str, Any]] = []
         metrics_by_symbol = await self._collect_liquidities(
             set(active_symbols), batch=batch_markets
         )
         fragilities = liquidity_fragility_scores(
             {symbol: list(metrics.values()) for symbol, metrics in metrics_by_symbol.items()}
         )
+        cadence_timestamp = datetime.now(UTC)
         for symbol in active_symbols:
             detail = await self._build_detail(
                 symbol,
@@ -257,10 +259,30 @@ class LiveRuntime:
                 batch_derivatives=batch_derivatives,
             )
             await self.state.update_symbol(symbol, detail)
+            batch_signals.append(
+                {
+                    "timestamp": cadence_timestamp,
+                    "symbol": symbol,
+                    "price": detail.get("price"),
+                    "activity_score": detail.get("activity_score"),
+                    "liquidity_fragility": detail.get("liquidity_fragility"),
+                    "move_type": detail.get("move_type"),
+                    "cross_exchange_state": detail.get("cross_exchange_state"),
+                    "oi_change_5m": detail.get("oi_change_5m"),
+                    "oi_change_15m": detail.get("oi_change_15m"),
+                    "oi_change_1h": detail.get("oi_change_1h"),
+                    "funding_rate": (
+                        detail.get("funding")
+                        if detail.get("funding") is not None
+                        else detail.get("funding_rate")
+                    ),
+                }
+            )
         await self._persist_metrics_batch(
             markets=batch_markets,
             flows=batch_flows,
             derivatives=batch_derivatives,
+            signals=batch_signals,
         )
 
     async def _run_cadence(self) -> None:
@@ -291,12 +313,17 @@ class LiveRuntime:
         markets: list[dict[str, Any]],
         flows: list[dict[str, Any]],
         derivatives: list[dict[str, Any]],
+        signals: list[dict[str, Any]] | None = None,
     ) -> None:
+        signal_rows = signals or []
         market_rows = [self._without_persistence_metadata(row) for row in markets]
         derivative_rows = [self._without_persistence_metadata(row) for row in derivatives]
         if hasattr(self.metrics, "append_batch"):
             await self.metrics.append_batch(
-                markets=market_rows, flows=flows, derivatives=derivative_rows
+                markets=market_rows,
+                flows=flows,
+                derivatives=derivative_rows,
+                signals=signal_rows,
             )
             self._advance_watermarks(markets, self._market_watermarks)
             self._advance_watermarks(derivatives, self._derivative_watermarks)
@@ -309,6 +336,11 @@ class LiveRuntime:
         for row, values in zip(derivatives, derivative_rows, strict=True):
             await self.metrics.append_derivative(values)
             self._advance_watermarks([row], self._derivative_watermarks)
+        if hasattr(self.metrics, "persist_signals") and signal_rows:
+            await self.metrics.persist_signals(signal_rows)
+        elif hasattr(self.metrics, "append_signal"):
+            for signal in signal_rows:
+                await self.metrics.append_signal(signal)
 
     @staticmethod
     def _without_persistence_metadata(row: dict[str, Any]) -> dict[str, Any]:

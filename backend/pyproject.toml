@@ -25,6 +25,7 @@ research = [
   "numpy>=2,<3",
 ]
 dev = [
+  "alembic>=1.14,<2",
   # Pydantic-maintained TestClient dependency.
   "httpx2>=2.12,<3",
   "mypy>=1.14,<2",

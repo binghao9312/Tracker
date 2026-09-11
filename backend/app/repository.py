@@ -18,6 +18,7 @@ from app.database import (
     MarketMetricRow,
     PaperTradeEventRow,
     PaperTradeRow,
+    SignalMetricRow,
 )
 
 
@@ -34,14 +35,24 @@ class MetricRepository:
     async def append_derivative(self, values: Mapping[str, Any]) -> None:
         await self._append(DerivativeMetricRow(**values))
 
+    async def append_signal(self, values: Mapping[str, Any]) -> None:
+        await self._append(SignalMetricRow(**values))
+
+    async def persist_signals(self, rows: Sequence[Mapping[str, Any]]) -> None:
+        if not rows:
+            return
+        async with self._sessions.begin() as session:
+            await session.execute(insert(SignalMetricRow), [dict(v) for v in rows])
+
     async def append_batch(
         self,
         *,
         markets: Sequence[Mapping[str, Any]] | None = None,
         flows: Sequence[Mapping[str, Any]] | None = None,
         derivatives: Sequence[Mapping[str, Any]] | None = None,
+        signals: Sequence[Mapping[str, Any]] | None = None,
     ) -> None:
-        if not markets and not flows and not derivatives:
+        if not markets and not flows and not derivatives and not signals:
             return
         async with self._sessions.begin() as session:
             if markets:
@@ -50,6 +61,8 @@ class MetricRepository:
                 await session.execute(insert(FlowMetricRow), [dict(v) for v in flows])
             if derivatives:
                 await session.execute(insert(DerivativeMetricRow), [dict(v) for v in derivatives])
+            if signals:
+                await session.execute(insert(SignalMetricRow), [dict(v) for v in signals])
 
     async def prune_metrics(self, before: datetime) -> int:
         """Delete aggregated metric rows older than the specified retention cutoff."""
@@ -90,6 +103,28 @@ class MetricRepository:
                 "flow": [_row_dict(row) for row in reversed(flow.all())],
                 "derivative": [_row_dict(row) for row in reversed(derivative.all())],
             }
+
+    async def signal_history(
+        self,
+        symbol: str,
+        start_time: datetime,
+        end_time: datetime,
+        limit: int = 3_600,
+    ) -> list[dict[str, Any]]:
+        effective_limit = 3_600 if limit is None or limit <= 0 else limit
+        async with self._sessions() as session:
+            statement = (
+                select(SignalMetricRow)
+                .where(
+                    SignalMetricRow.symbol == symbol,
+                    SignalMetricRow.timestamp >= start_time,
+                    SignalMetricRow.timestamp <= end_time,
+                )
+                .order_by(SignalMetricRow.timestamp.asc(), SignalMetricRow.id.asc())
+                .limit(effective_limit)
+            )
+            rows = await session.scalars(statement)
+            return [_signal_row_dict(row) for row in rows.all()]
 
     async def history_range(
         self,
@@ -152,7 +187,10 @@ class MetricRepository:
                 "derivative": [_history_row_dict(row) for row in derivative_rows.all()],
             }
 
-    async def _append(self, row: MarketMetricRow | FlowMetricRow | DerivativeMetricRow) -> None:
+    async def _append(
+        self,
+        row: MarketMetricRow | FlowMetricRow | DerivativeMetricRow | SignalMetricRow,
+    ) -> None:
         async with self._sessions.begin() as session:
             session.add(row)
 
@@ -375,7 +413,14 @@ def _finite_sum(values: Iterable[object]) -> float:
 
 
 def _row_dict(
-    row: MarketMetricRow | FlowMetricRow | DerivativeMetricRow | PaperTradeRow | PaperTradeEventRow,
+    row: (
+        MarketMetricRow
+        | FlowMetricRow
+        | DerivativeMetricRow
+        | PaperTradeRow
+        | PaperTradeEventRow
+        | SignalMetricRow
+    ),
 ) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for column in row.__table__.columns:
@@ -389,3 +434,20 @@ def _history_row_dict(row: MarketMetricRow | FlowMetricRow | DerivativeMetricRow
     timestamp = row.timestamp
     result["timestamp"] = int(timestamp.timestamp() * 1_000)
     return result
+
+
+def _signal_row_dict(row: SignalMetricRow) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "timestamp": row.timestamp,
+        "symbol": row.symbol,
+        "price": row.price,
+        "activity_score": row.activity_score,
+        "liquidity_fragility": row.liquidity_fragility,
+        "move_type": row.move_type,
+        "cross_exchange_state": row.cross_exchange_state,
+        "oi_change_5m": row.oi_change_5m,
+        "oi_change_15m": row.oi_change_15m,
+        "oi_change_1h": row.oi_change_1h,
+        "funding_rate": row.funding_rate,
+    }

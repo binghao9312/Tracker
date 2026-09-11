@@ -77,6 +77,24 @@ class DerivativeMetricRow(Base):
     funding_rate: Mapped[float | None] = mapped_column(Float)
 
 
+class SignalMetricRow(Base):
+    __tablename__ = "signal_metrics"
+    __table_args__ = (Index("ix_signal_metrics_lookup", "symbol", "timestamp"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    symbol: Mapped[str] = mapped_column(String(32))
+    price: Mapped[float | None] = mapped_column(Float)
+    activity_score: Mapped[float | None] = mapped_column(Float)
+    liquidity_fragility: Mapped[float | None] = mapped_column(Float)
+    move_type: Mapped[str | None] = mapped_column(String(24))
+    cross_exchange_state: Mapped[str | None] = mapped_column(String(24))
+    oi_change_5m: Mapped[float | None] = mapped_column(Float)
+    oi_change_15m: Mapped[float | None] = mapped_column(Float)
+    oi_change_1h: Mapped[float | None] = mapped_column(Float)
+    funding_rate: Mapped[float | None] = mapped_column(Float)
+
+
 class PaperTradeRow(Base):
     __tablename__ = "paper_trades"
     __table_args__ = (
