@@ -46,3 +46,4 @@ Thumbs.db
 
 # delegated-task specs and logs
 .agent-tasks/*.log
+.agent-tasks/sessions/

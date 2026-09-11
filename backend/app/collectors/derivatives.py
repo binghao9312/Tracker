@@ -43,7 +43,7 @@ class DerivativePollingCollector:
                 timeout = _status_retry_delay(error, delay)
                 delay = min(delay * 2, 60.0)
             except (aiohttp.ClientError, OSError, ValueError) as error:
-                logger.warning("derivative_collector_retry: %s", error)
+                logger.warning("derivative_collector_retry: %s: %s", type(error).__name__, error)
                 timeout = delay
                 delay = min(delay * 2, 300.0)
             except Exception:
@@ -74,5 +74,5 @@ def _status_retry_delay(error: aiohttp.ClientResponseError, fallback: float) -> 
         return max(60.0, retry_after)
     if error.status == 429:
         return max(min(fallback, 60.0), retry_after)
-    logger.warning("derivative_collector_retry: %s", error)
+    logger.warning("derivative_collector_retry: %s: %s", type(error).__name__, error)
     return fallback
