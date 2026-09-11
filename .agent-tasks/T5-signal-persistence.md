@@ -26,10 +26,18 @@ task fixes that, and introduces Alembic so the schema change is deployable.
   Do not create a venv and do not install anything; alembic is already present.
 - Baseline: **148 passed**, `ruff check`, `ruff format --check`, `mypy app` all clean.
   Keep it that way.
-- A live PostgreSQL is running in Docker for manual verification only:
-  `docker exec qtrade-postgres-1 psql -U qtrade -d qtrade -c "..."`. It already holds
-  ~3.2M `market_metrics`, ~3.2M `flow_metrics`, ~770k `derivative_metrics` rows and
-  **0** `paper_trades`. Do NOT delete or rewrite existing rows.
+- PostgreSQL runs in Docker. There are TWO databases and the difference matters:
+  - `qtrade` is the LIVE database, holding ~3.2M `market_metrics`, ~3.2M
+    `flow_metrics`, ~770k `derivative_metrics` rows. **You must not connect to it,
+    migrate it, or write to it. Never run `alembic upgrade` against it.** Reading it
+    with a `select` is fine if you need to inspect the existing schema.
+  - `qtrade_migrate_check` is a throwaway schema-only clone of it, prepared for you,
+    with the same five tables and no rows. Run every migration against this one:
+    `DATABASE_URL=postgresql+asyncpg://qtrade:qtrade@localhost:5432/qtrade_migrate_check`
+    (from inside the container use
+    `docker exec qtrade-postgres-1 psql -U qtrade -d qtrade_migrate_check -c "..."`).
+    If you destroy it, say so in your report -- it is disposable and that is the point.
+  Migrating the live database is an operator step that happens after human review.
 - `backend/app/database.py:153` currently creates the schema with
   `Base.metadata.create_all`. Existing tables must keep working; see "Required
   behaviour" item 4 for exactly how the two mechanisms must coexist.
@@ -112,14 +120,15 @@ Run from the repo root and report the real output of each:
     cd backend && ./.venv/Scripts/python -m ruff check .
     cd backend && ./.venv/Scripts/python -m ruff format --check .
     cd backend && ./.venv/Scripts/python -m mypy app
-    cd backend && ./.venv/Scripts/python -m alembic upgrade head
-    docker exec qtrade-postgres-1 psql -U qtrade -d qtrade -c "\d signal_metrics"
-    docker exec qtrade-postgres-1 psql -U qtrade -d qtrade -c "select count(*) from market_metrics;"
+    cd backend && DATABASE_URL=postgresql+asyncpg://qtrade:qtrade@localhost:5432/qtrade_migrate_check ./.venv/Scripts/python -m alembic upgrade head
+    docker exec qtrade-postgres-1 psql -U qtrade -d qtrade_migrate_check -c "\d signal_metrics"
+    docker exec qtrade-postgres-1 psql -U qtrade -d qtrade_migrate_check -c "\dt"
 
 The first four must pass with MORE passing tests than the 148 baseline and zero
-failures. `alembic upgrade head` must succeed against the live database, and the
-`market_metrics` count must still be in the millions afterwards -- if a migration
-truncates or recreates an existing table, that is a hard failure of this task.
+failures. `alembic upgrade head` must succeed against `qtrade_migrate_check`, and
+`\dt` must afterwards list all SIX tables (the original five plus `signal_metrics`)
+-- if a migration drops or recreates one of the original five, that is a hard failure
+of this task even if the command exits 0.
 
 In your final report paste: the pytest summary line, the mypy line, the
-`\d signal_metrics` output, the `market_metrics` count, and `git status --short`.
+`\d signal_metrics` output, the `\dt` table list, and `git status --short`.
