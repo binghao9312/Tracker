@@ -178,6 +178,22 @@ class ReplayOutcomeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.cadences, 9)
         self.assertEqual(result.stats["by_exit_reason"], {"TAKE_PROFIT": 1})
 
+    async def test_a_feed_gap_does_not_erase_an_active_cooldown(self) -> None:
+        # A cooldown is a time rule: "do not re-enter this symbol for N minutes after
+        # closing". A feed outage is not observation of anything, so it cannot satisfy
+        # or cancel that rule -- if a gap re-arms the symbol early, the backtest invents
+        # trades that the live engine would never have taken, and every one of them
+        # lands in win_rate and profit_factor.
+        rows = [snapshot(second, 100.0) for second in range(0, 8)]
+        rows.append(snapshot(8, 105.0))          # closes on take-profit, starts cooldown
+        rows += [snapshot(600 + second, 100.0) for second in range(0, 8)]  # after a gap
+        result = await replay(
+            rows, settings(cooldown_minutes=60), max_gap_seconds=5.0
+        )
+        self.assertGreaterEqual(result.gaps, 1)
+        # The cooldown still had ~50 minutes to run, so no second trade may open.
+        self.assertEqual(len(result.trades), 1)
+
     async def test_symbols_are_replayed_independently(self) -> None:
         rows: list[Snapshot] = []
         for second in range(0, 8):
