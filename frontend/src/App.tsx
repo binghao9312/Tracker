@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { MetricChart, type ChartPoint } from "./MetricChart";
+import { useReconnectingSocket } from "./useReconnectingSocket";
 
 type ScannerRow = {
   symbol: string;
@@ -78,20 +79,90 @@ export function App() {
   const [replay, setReplay] = useState<{ trade: PaperTrade; entry_snapshot: Detail; exit_snapshot: Detail | null; history: { market: ChartPoint[] } } | null>(null);
   const [alerts, setAlerts] = useState<AlertItem[]>([]);
   const [filter, setFilter] = useState("");
+  const pendingUpdates = useRef<Map<string, ScannerRow>>(new Map());
+  const flushTimer = useRef<number | null>(null);
+
+  const flushUpdates = () => {
+    if (pendingUpdates.current.size === 0) return;
+    const batch = pendingUpdates.current;
+    pendingUpdates.current = new Map();
+    setRows(current => {
+      const updatedSymbols = new Set<string>();
+      const next = current.map(row => {
+        const update = batch.get(row.symbol);
+        if (update) {
+          updatedSymbols.add(row.symbol);
+          return update;
+        }
+        return row;
+      });
+      for (const [symbol, row] of batch.entries()) {
+        if (!updatedSymbols.has(symbol)) {
+          next.push(row);
+        }
+      }
+      return next;
+    });
+  };
+
   useEffect(() => {
-    void fetch("/api/scanner").then(response => response.json()).then(setRows).catch(() => setConnection("OFFLINE"));
-    const socket = new WebSocket(socketUrl("/ws/scanner"));
-    socket.onopen = () => setConnection("CONNECTED");
-    socket.onclose = () => setConnection("RECONNECTING");
-    socket.onmessage = ({ data }) => {
+    void fetch("/api/scanner")
+      .then(response => response.json() as Promise<ScannerRow[]>)
+      .then(data => {
+        if (flushTimer.current !== null) {
+          window.clearTimeout(flushTimer.current);
+          flushTimer.current = null;
+        }
+        pendingUpdates.current.clear();
+        setRows(data);
+      })
+      .catch(() => setConnection("OFFLINE"));
+
+    return () => {
+      if (flushTimer.current !== null) {
+        window.clearTimeout(flushTimer.current);
+        flushTimer.current = null;
+      }
+      flushUpdates();
+    };
+  }, []);
+
+  useReconnectingSocket(socketUrl("/ws/scanner"), {
+    onOpen: () => {
+      setConnection("CONNECTED");
+      void fetch("/api/scanner")
+        .then(response => response.json() as Promise<ScannerRow[]>)
+        .then(data => {
+          if (flushTimer.current !== null) {
+            window.clearTimeout(flushTimer.current);
+            flushTimer.current = null;
+          }
+          pendingUpdates.current.clear();
+          setRows(data);
+        })
+        .catch(() => setConnection("OFFLINE"));
+    },
+    onStatusChange: (status) => setConnection(status),
+    onMessage: (data) => {
       const message = JSON.parse(data) as { type: string; data: ScannerRow | ScannerRow[] };
       if (message.type !== "scanner") return;
       if (Array.isArray(message.data)) {
+        if (flushTimer.current !== null) {
+          window.clearTimeout(flushTimer.current);
+          flushTimer.current = null;
+        }
+        pendingUpdates.current.clear();
         setRows(message.data);
         return;
       }
       const update = message.data as ScannerRow;
-      setRows(current => [...current.filter(row => row.symbol !== update.symbol), update]);
+      pendingUpdates.current.set(update.symbol, update);
+      if (flushTimer.current === null) {
+        flushTimer.current = window.setTimeout(() => {
+          flushTimer.current = null;
+          flushUpdates();
+        }, 250);
+      }
       const score = update.activity_score ?? 0;
       const isConfirmed = update.cross_exchange_state === "CONFIRMED";
       if (score >= 60 || isConfirmed) {
@@ -105,9 +176,8 @@ export function App() {
           level: isConfirmed ? "confirmed" : "high",
         }, ...curr.slice(0, 7)]);
       }
-    };
-    return () => socket.close();
-  }, []);
+    },
+  });
 
   useEffect(() => {
     if (!selected) return;
@@ -127,25 +197,29 @@ export function App() {
     return () => { current = false; };
   }, [selected]);
 
-  useEffect(() => {
-    if (!selected || mode !== "SCANNER") return;
-    const socket = new WebSocket(socketUrl(`/ws/symbol/${selected}`));
-    socket.onmessage = ({ data }) => { const message = JSON.parse(data) as { type: string; data: Detail }; if (message.type === "symbol") setDetail(message.data); };
-    return () => socket.close();
-  }, [selected, mode]);
+  useReconnectingSocket(selected && mode === "SCANNER" ? socketUrl(`/ws/symbol/${selected}`) : null, {
+    onMessage: (data) => {
+      const message = JSON.parse(data) as { type: string; data: Detail };
+      if (message.type === "symbol") setDetail(message.data);
+    },
+  });
+
+  const refreshPaper = () => {
+    void fetch("/api/paper/trades?limit=250").then(response => response.json() as Promise<PaperTrade[]>).then(setTrades);
+    void fetch("/api/paper/positions").then(response => response.json() as Promise<PaperTrade[]>).then(setPositions);
+    void fetch("/api/paper/stats").then(response => response.json() as Promise<PaperStats>).then(setStats);
+  };
 
   useEffect(() => {
-    if (mode !== "PAPER") return;
-    const refresh = () => {
-      void fetch("/api/paper/trades?limit=250").then(response => response.json()).then(setTrades);
-      void fetch("/api/paper/positions").then(response => response.json()).then(setPositions);
-      void fetch("/api/paper/stats").then(response => response.json()).then(setStats);
-    };
-    refresh();
-    const socket = new WebSocket(socketUrl("/ws/paper"));
-    socket.onmessage = refresh;
-    return () => socket.close();
+    if (mode === "PAPER") {
+      refreshPaper();
+    }
   }, [mode]);
+
+  useReconnectingSocket(mode === "PAPER" ? socketUrl("/ws/paper") : null, {
+    onOpen: refreshPaper,
+    onMessage: refreshPaper,
+  });
 
   const filtered = useMemo(() => {
     const q = filter.trim().toUpperCase();
@@ -202,7 +276,29 @@ function DetailPane({ selected, detail }: { selected: string | null; detail: Det
 
 
 function PaperPage({ stats, positions, trades, replay, currentPrices, onReplay, onCloseReplay }: { stats: PaperStats | null; positions: PaperTrade[]; trades: PaperTrade[]; replay: { trade: PaperTrade; entry_snapshot: Detail; exit_snapshot: Detail | null; history: { market: ChartPoint[] } } | null; currentPrices: Record<string, number>; onReplay: (trade: PaperTrade) => void; onCloseReplay: () => void }) {
-  if (replay) return <section className="replay"><button onClick={onCloseReplay}>← PAPER TRADES</button><h2>TRADE REPLAY / {replay.trade.symbol} {replay.trade.side}</h2><p>Entry {new Date(replay.trade.opened_at).toLocaleString()} · Price {number(replay.trade.entry_price)} · Activity {number(replay.trade.entry_activity_score as number)} · Fragility {number(replay.trade.entry_liquidity_fragility as number)}</p><p>Exit {replay.trade.exit_reason ?? "OPEN"} · Price {number(replay.trade.exit_price)} · Return {percent(replay.trade.return_pct)} · PnL {number(replay.trade.net_pnl)} · MFE {percent(replay.trade.max_favorable_excursion_pct)} · MAE {percent(replay.trade.max_adverse_excursion_pct)}</p><MetricChart data={replay.history.market ?? []} markers={[{ timestamp: replay.trade.opened_at, price: replay.trade.entry_price, label: "ENTRY", color: "#42d392", position: "belowBar" }, ...(replay.trade.exit_price !== null && replay.trade.closed_at ? [{ timestamp: replay.trade.closed_at, price: replay.trade.exit_price, label: "EXIT", color: "#ff6b6b", position: "aboveBar" } as const] : [])]}/><SignalMetrics snapshot={replay.entry_snapshot}/></section>;
+  const markers = useMemo(() => {
+    if (!replay) return [];
+    return [
+      {
+        timestamp: replay.trade.opened_at,
+        price: replay.trade.entry_price,
+        label: "ENTRY",
+        color: "#42d392",
+        position: "belowBar" as const,
+      },
+      ...(replay.trade.exit_price !== null && replay.trade.closed_at
+        ? [{
+            timestamp: replay.trade.closed_at,
+            price: replay.trade.exit_price,
+            label: "EXIT",
+            color: "#ff6b6b",
+            position: "aboveBar" as const,
+          }]
+        : []),
+    ];
+  }, [replay]);
+
+  if (replay) return <section className="replay"><button onClick={onCloseReplay}>← PAPER TRADES</button><h2>TRADE REPLAY / {replay.trade.symbol} {replay.trade.side}</h2><p>Entry {new Date(replay.trade.opened_at).toLocaleString()} · Price {number(replay.trade.entry_price)} · Activity {number(replay.trade.entry_activity_score as number)} · Fragility {number(replay.trade.entry_liquidity_fragility as number)}</p><p>Exit {replay.trade.exit_reason ?? "OPEN"} · Price {number(replay.trade.exit_price)} · Return {percent(replay.trade.return_pct)} · PnL {number(replay.trade.net_pnl)} · MFE {percent(replay.trade.max_favorable_excursion_pct)} · MAE {percent(replay.trade.max_adverse_excursion_pct)}</p><MetricChart data={replay.history.market ?? []} markers={markers}/><SignalMetrics snapshot={replay.entry_snapshot}/></section>;
   return <section className="paper"><div className="stats">{[["TOTAL TRADES", stats?.total_trades], ["WIN RATE", stats ? percent(stats.win_rate) : null], ["NET PNL", stats?.net_pnl == null ? null : number(stats.net_pnl)], ["PROFIT FACTOR", stats?.profit_factor], ["OPEN POSITIONS", stats?.open_trades]].map(([label, value]) => <div key={String(label)}><small>{label}</small><strong>{typeof value === "number" ? number(value) : value ?? "—"}</strong></div>)}</div><h2>OPEN POSITIONS</h2><TradeTable trades={positions} currentPrices={currentPrices}/><h2>TRADE HISTORY</h2><TradeTable trades={trades} currentPrices={currentPrices} onReplay={onReplay}/><PerformanceBreakdowns breakdowns={stats?.breakdowns as Record<string, Record<string, BreakdownSummary>> | undefined}/></section>;
 }
 
