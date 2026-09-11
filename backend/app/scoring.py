@@ -61,6 +61,23 @@ class ClassificationThresholds:
 
 
 @dataclass(frozen=True)
+class ActivityScoreScales:
+    spot_pressure_saturation: float
+    perp_pressure_saturation: float
+    oi_change_saturation: float
+    funding_saturation: float
+
+    def __post_init__(self) -> None:
+        for field in (
+            "spot_pressure_saturation",
+            "perp_pressure_saturation",
+            "oi_change_saturation",
+            "funding_saturation",
+        ):
+            object.__setattr__(self, field, _positive_float(field, getattr(self, field)))
+
+
+@dataclass(frozen=True)
 class DataRetentionSettings:
     metric_history_days: int = 30
 
@@ -113,6 +130,34 @@ def load_classification_thresholds(path: Path) -> ClassificationThresholds:
     )
 
 
+def load_activity_score_scales(path: Path) -> ActivityScoreScales:
+    """Load validated activity-score saturation scales from the scoring configuration."""
+    values = _scoring_section(path, "activity")
+    required = {
+        "spot_pressure_saturation",
+        "perp_pressure_saturation",
+        "oi_change_saturation",
+        "funding_saturation",
+    }
+    missing = required - values.keys()
+    if missing:
+        raise ValueError(f"activity configuration is missing: {', '.join(sorted(missing))}")
+    if values.keys() - required:
+        raise ValueError("activity configuration has unsupported values")
+    return ActivityScoreScales(
+        spot_pressure_saturation=_positive_float(
+            "spot_pressure_saturation", values["spot_pressure_saturation"]
+        ),
+        perp_pressure_saturation=_positive_float(
+            "perp_pressure_saturation", values["perp_pressure_saturation"]
+        ),
+        oi_change_saturation=_positive_float(
+            "oi_change_saturation", values["oi_change_saturation"]
+        ),
+        funding_saturation=_positive_float("funding_saturation", values["funding_saturation"]),
+    )
+
+
 def _scoring_section(path: Path, section: str) -> Mapping[str, object]:
     with path.open(encoding="utf-8") as file:
         configured = yaml.safe_load(file)
@@ -131,6 +176,23 @@ def _nonnegative_float(field: str, value: object) -> float:
     if not isfinite(number) or number < 0:
         raise ValueError(f"{field} must be a finite nonnegative number")
     return number
+
+
+def _positive_float(field: str, value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{field} must be a finite positive number")
+    number = float(value)
+    if not isfinite(number) or number <= 0:
+        raise ValueError(f"{field} must be a finite positive number")
+    return number
+
+
+DEFAULT_ACTIVITY_SCORE_SCALES = ActivityScoreScales(
+    spot_pressure_saturation=1.0,
+    perp_pressure_saturation=3.0,
+    oi_change_saturation=0.02,
+    funding_saturation=0.0005,
+)
 
 
 def classify_move(signal: MarketSignal, thresholds: ClassificationThresholds) -> MoveType:
@@ -319,6 +381,7 @@ def activity_score(
     perp_pressure_1m: float | None = None,
     perp_pressure_5m: float | None = None,
     perp_cvd_ratio: float | None = None,
+    scales: ActivityScoreScales = DEFAULT_ACTIVITY_SCORE_SCALES,
 ) -> float:
     """Score market abnormality from bounded, direction-neutral available inputs.
 
@@ -335,8 +398,8 @@ def activity_score(
 
     pressure_component = _available_mean(
         (
-            _market_pressure(spot_pressure_1m, spot_pressure_5m),
-            _market_pressure(perp_pressure_1m, perp_pressure_5m),
+            _market_pressure(spot_pressure_1m, spot_pressure_5m, scales.spot_pressure_saturation),
+            _market_pressure(perp_pressure_1m, perp_pressure_5m, scales.perp_pressure_saturation),
         )
     )
     flow_component = _available_mean(
@@ -348,14 +411,16 @@ def activity_score(
     components = (
         50 * pressure_component,
         30 * flow_component,
-        10 * _bounded_magnitude(oi_change),
-        5 * _bounded_magnitude(funding, scale=1_000),
+        10 * _bounded_magnitude(oi_change, scale=1 / scales.oi_change_saturation),
+        5 * _bounded_magnitude(funding, scale=1 / scales.funding_saturation),
         5 if confirmed else 0,
     )
     return round(min(sum(components), 100), 2)
 
 
-def _market_pressure(pressure_1m: float | None, pressure_5m: float | None) -> float | None:
+def _market_pressure(
+    pressure_1m: float | None, pressure_5m: float | None, saturation: float
+) -> float | None:
     """Blend available pressure windows while keeping the short window responsive."""
     weighted = (
         (pressure_1m, 0.45),
@@ -364,7 +429,7 @@ def _market_pressure(pressure_1m: float | None, pressure_5m: float | None) -> fl
     available = [(value, weight) for value, weight in weighted if value is not None]
     if not available:
         return None
-    return sum(min(abs(value) / 3, 1.0) * weight for value, weight in available) / sum(
+    return sum(min(abs(value) / saturation, 1.0) * weight for value, weight in available) / sum(
         weight for _, weight in available
     )
 

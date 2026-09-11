@@ -24,5 +24,11 @@ paper_trading:
   fee_bps: 5
   require_cross_exchange_confirmation: false
 
+activity:
+  spot_pressure_saturation: 1.0
+  perp_pressure_saturation: 3.0
+  oi_change_saturation: 0.02
+  funding_saturation: 0.0005
+
 data_retention:
   metric_history_days: 30

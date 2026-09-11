@@ -19,6 +19,10 @@ The backend loads `config/universe.json`, discovers currently live Binance/OKX m
 `config/scoring.yaml` controls metric scoring and retention. Set
 `data_retention.metric_history_days` to retain aggregated market, flow, and derivative
 metrics for that many days. Default: 30 days.
+`activity.*` sets each activity-score component's saturation point; a component at
+its saturation earns its full weight. These values are calibrated from observed
+distributions and should be re-derived from a longer window that includes a
+volatility event.
 
 ## Database migrations
 

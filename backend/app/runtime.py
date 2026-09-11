@@ -22,6 +22,7 @@ from app.collectors.orderbooks import (
     OkxOrderBookManager,
 )
 from app.collectors.trades import BinanceTradeManager, OkxTradeManager
+from app.config import scoring_path
 from app.discovery import MarketDiscoveryService
 from app.exchanges.binance import BinanceAdapter
 from app.exchanges.derivatives import (
@@ -45,6 +46,7 @@ from app.models import (
 from app.orderbook import LocalOrderBook
 from app.repository import MetricRepository
 from app.scoring import (
+    ActivityScoreScales,
     ClassificationThresholds,
     MarketSignal,
     MoveType,
@@ -54,6 +56,7 @@ from app.scoring import (
     cross_exchange_state,
     exchange_directions,
     liquidity_fragility_scores,
+    load_activity_score_scales,
 )
 
 logger = logging.getLogger(__name__)
@@ -85,6 +88,7 @@ class LiveRuntime:
         session: aiohttp.ClientSession | None = None,
         discovery: MarketDiscoveryService | None = None,
         thresholds: ClassificationThresholds | None = None,
+        activity_score_scales: ActivityScoreScales | None = None,
         metric_history_days: int = 30,
         cadence_seconds: float = 1.0,
     ) -> None:
@@ -94,6 +98,11 @@ class LiveRuntime:
         self._owns_session = session is None
         self._discovery = discovery
         self._thresholds = thresholds or ClassificationThresholds()
+        self._activity_score_scales = (
+            activity_score_scales
+            if activity_score_scales is not None
+            else load_activity_score_scales(scoring_path())
+        )
         self._cadence_seconds = cadence_seconds
         self._retention_hours = metric_history_days * 24
         self._stop = asyncio.Event()
@@ -663,6 +672,7 @@ class LiveRuntime:
                 perp_cvd_ratio=self._delta_ratio(
                     perp.get("buy_volume_5m"), perp.get("sell_volume_5m")
                 ),
+                scales=self._activity_score_scales,
             ),
             "liquidity_fragility": fragility,
             "move_type": move_type.value,
