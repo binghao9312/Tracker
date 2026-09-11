@@ -39,7 +39,12 @@ class MemoryPaperRepository:
         return deepcopy(row)
 
 
-def detail(price: float = 100.0, score: float = 90.0) -> dict[str, Any]:
+def detail(
+    price: float = 100.0,
+    score: float = 90.0,
+    *,
+    books: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     return {
         "price": price,
         "activity_score": score,
@@ -60,5 +65,10 @@ def detail(price: float = 100.0, score: float = 90.0) -> dict[str, Any]:
             "sell_volume_5m": 100.0,
             "cvd_5m": 300.0,
         },
-        "orderbooks": {"binance": {"perp": {"bids": [[99.0, 100.0]], "asks": [[101.0, 100.0]]}}},
+        "orderbooks": books if books is not None else {"binance": {"perp": book(price)}},
     }
+
+
+def book(price: float, *, depth: float = 100.0, spread: float = 1.0) -> dict[str, Any]:
+    """One-level book whose mid is exactly `price`."""
+    return {"bids": [[price - spread, depth]], "asks": [[price + spread, depth]]}
