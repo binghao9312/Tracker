@@ -1,1 +1,1 @@
-"""Feed health research module."""
+"""Read-only research modules (feed_health, forward, ...). Never imported by app/."""
