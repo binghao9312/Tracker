@@ -36,5 +36,7 @@ Expected result: the scanner response becomes a JSON array of monitored symbols 
 ```sh
 .venv/Scripts/python.exe -m pytest backend/tests
 .venv/Scripts/ruff.exe check backend
+.venv/Scripts/ruff.exe format --check backend
+.venv/Scripts/mypy.exe backend/app
 cd frontend && npm run build
 ```

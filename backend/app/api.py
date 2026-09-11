@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections import defaultdict
 from collections.abc import AsyncIterator
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
@@ -76,6 +76,7 @@ class DashboardDetail(BaseModel):
     orderbooks: dict[str, Any] = Field(default_factory=dict)
     derivatives: dict[str, dict[str, float | int | None]] = Field(default_factory=dict)
     liquidity: dict[str, Any] = Field(default_factory=dict)
+
 
 class DashboardState:
     """Concurrency-safe latest-value cache; PostgreSQL remains the history source."""
@@ -212,7 +213,8 @@ def create_app(
         if trade is None:
             raise HTTPException(status_code=404, detail="paper trade does not exist")
         history: dict[str, list[dict[str, Any]]] = {"market": [], "flow": [], "derivative": []}
-        end = _timestamp(trade.get("closed_at")) or datetime.now().astimezone()
+        closed_at = trade.get("closed_at")
+        end = _timestamp(closed_at) if closed_at is not None else datetime.now(UTC)
         if history_repository is not None:
             history = await history_repository.history_range(
                 trade["symbol"],

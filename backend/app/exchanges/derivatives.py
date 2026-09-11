@@ -60,9 +60,7 @@ class BinanceDerivativeScheduler:
         retry_after = _retry_after_seconds(error)
         async with self._lock:
             delay = (
-                max(retry_after, 60.0)
-                if error.status == 418
-                else max(retry_after, self._backoff)
+                max(retry_after, 60.0) if error.status == 418 else max(retry_after, self._backoff)
             )
             self._blocked_until = max(self._blocked_until, monotonic() + delay)
             if error.status == 429:
@@ -76,6 +74,29 @@ class BinanceDerivativeScheduler:
     @property
     def retry_delay(self) -> float:
         return max(0.0, self._blocked_until - monotonic())
+
+
+class OkxDerivativeScheduler:
+    """Serialize and pace complete OKX derivative snapshot request groups."""
+
+    def __init__(self, symbol_count: int, *, cadence_seconds: float = 30.0) -> None:
+        self._spacing = cadence_seconds / max(symbol_count, 1)
+        self._semaphore = asyncio.Semaphore(1)
+        self._lock = asyncio.Lock()
+        self._next_request_at = 0.0
+
+    @asynccontextmanager
+    async def slot(self):
+        async with self._semaphore:
+            while True:
+                async with self._lock:
+                    now = monotonic()
+                    if self._next_request_at <= now:
+                        self._next_request_at = now + self._spacing
+                        break
+                    delay = self._next_request_at - now
+                await asyncio.sleep(delay)
+            yield
 
 
 class BinanceDerivativesProvider:
@@ -100,12 +121,10 @@ class BinanceDerivativesProvider:
         if not isinstance(open_interest, dict) or not isinstance(premium, dict):
             raise ValueError("Binance derivative response is invalid")
         try:
-            mark_price = float(premium["markPrice"])
-            oi = float(open_interest["openInterest"]) * instrument.base_quantity_multiplier
-            funding = float(premium["lastFundingRate"])
-            source_timestamp = int(
-                premium.get("time", open_interest.get("time", received_at))
-            )
+            mark_price = _number(premium["markPrice"])
+            oi = _number(open_interest["openInterest"]) * instrument.base_quantity_multiplier
+            funding = _number(premium["lastFundingRate"])
+            source_timestamp = _integer(premium.get("time", open_interest.get("time", received_at)))
         except (KeyError, TypeError, ValueError) as error:
             raise ValueError("Binance derivative response has invalid values") from error
         return DerivativeSnapshot(
@@ -121,13 +140,15 @@ class BinanceDerivativesProvider:
 
 
 class OkxDerivativesProvider:
-    def __init__(self, http_client: JsonHttpClient) -> None:
+    def __init__(
+        self, http_client: JsonHttpClient, scheduler: OkxDerivativeScheduler | None = None
+    ) -> None:
         self._http = http_client
-        self._semaphore = asyncio.Semaphore(1)
+        self._scheduler = scheduler or OkxDerivativeScheduler(1)
 
     async def snapshot(self, instrument: MarketInstrument) -> DerivativeSnapshot:
         _require_perpetual(instrument, Exchange.OKX)
-        async with self._semaphore:
+        async with self._scheduler.slot():
             await asyncio.sleep(0.08)
             open_interest = await self._http.get_json(
                 f"https://www.okx.com/api/v5/public/open-interest?instType=SWAP&instId={instrument.exchange_symbol}"
@@ -144,15 +165,15 @@ class OkxDerivativesProvider:
         funding_record = _okx_single_record(funding)
         mark_record = _okx_single_record(mark_price)
         try:
-            oi = float(oi_record["oi"])
-            oi_usd = float(oi_record["oiUsd"])
-            rate = float(funding_record["fundingRate"])
-            mark = float(mark_record["markPx"])
+            oi = _number(oi_record["oi"])
+            oi_usd = _number(oi_record["oiUsd"])
+            rate = _number(funding_record["fundingRate"])
+            mark = _number(mark_record["markPx"])
         except (KeyError, TypeError, ValueError) as error:
             raise ValueError("OKX derivative response has invalid values") from error
         received_at = time_ns() // 1_000_000
         try:
-            source_timestamp = int(mark_record.get("ts", oi_record.get("ts", received_at)))
+            source_timestamp = _integer(mark_record.get("ts", oi_record.get("ts", received_at)))
         except (TypeError, ValueError) as error:
             raise ValueError("OKX derivative response has invalid timestamp") from error
         return DerivativeSnapshot(
@@ -191,3 +212,15 @@ def _okx_single_record(payload: object) -> dict[str, object]:
     if len(records) != 1:
         raise ValueError("OKX derivative response must have one record")
     return records[0]
+
+
+def _number(value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        raise TypeError("derivative numeric value has an unsupported type")
+    return float(value)
+
+
+def _integer(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        raise TypeError("derivative timestamp has an unsupported type")
+    return int(value)

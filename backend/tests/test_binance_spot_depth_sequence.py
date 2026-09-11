@@ -79,7 +79,6 @@ class BinanceSpotDepthSequenceTests(unittest.TestCase):
         self.assertFalse(book.synchronized)
 
 
-
 class BinanceFuturesDepthSequenceTests(unittest.TestCase):
     @staticmethod
     def _book(sequence: int = 100) -> LocalOrderBook:
@@ -155,6 +154,7 @@ class BinanceFuturesDepthSequenceTests(unittest.TestCase):
             )
 
         self.assertFalse(book.synchronized)
+
 
 if __name__ == "__main__":
     unittest.main()

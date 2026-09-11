@@ -52,6 +52,14 @@ class _TradeManager:
                 )
                 await self._sleep_or_stop(stop, delay)
                 delay = min(delay * 2, 30.0)
+            except Exception:
+                logger.exception(
+                    "trade_manager_unexpected: %s (%s)",
+                    type(self).__name__,
+                    self._market.value,
+                )
+                await self._sleep_or_stop(stop, delay)
+                delay = min(delay * 2, 30.0)
 
     @staticmethod
     async def _sleep_or_stop(stop: asyncio.Event, delay: float) -> None:
@@ -66,14 +74,14 @@ class _TradeManager:
     async def _publish_binance_trade(
         self, instrument: MarketInstrument, data: dict[str, object]
     ) -> None:
-        price = float(data["p"])
-        quantity = float(data["q"]) * instrument.base_quantity_multiplier
+        price = _number(data, "p")
+        quantity = _number(data, "q") * instrument.base_quantity_multiplier
         await self._on_trade(
             NormalizedTrade(
                 exchange=instrument.exchange,
                 symbol=instrument.symbol,
                 market=instrument.market,
-                timestamp=int(data["T"]),
+                timestamp=_integer(data, "T"),
                 price=price,
                 quantity=quantity,
                 quote_value=price * quantity,
@@ -87,14 +95,14 @@ class _TradeManager:
         side = record.get("side")
         if side not in {"buy", "sell"}:
             raise ValueError("OKX trade message is invalid")
-        price = float(record["px"])
-        quantity = float(record["sz"]) * instrument.base_quantity_multiplier
+        price = _number(record, "px")
+        quantity = _number(record, "sz") * instrument.base_quantity_multiplier
         await self._on_trade(
             NormalizedTrade(
                 exchange=instrument.exchange,
                 symbol=instrument.symbol,
                 market=instrument.market,
-                timestamp=int(record["ts"]),
+                timestamp=_integer(record, "ts"),
                 price=price,
                 quantity=quantity,
                 quote_value=price * quantity,
@@ -195,3 +203,17 @@ def _object(raw: str) -> dict[str, object]:
     if not isinstance(data, dict):
         raise ValueError("trade message is not an object")
     return data
+
+
+def _number(data: dict[str, object], name: str) -> float:
+    value = data[name]
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        raise ValueError(f"{name} must be numeric")
+    return float(value)
+
+
+def _integer(data: dict[str, object], name: str) -> int:
+    value = data[name]
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        raise ValueError(f"{name} must be an integer")
+    return int(value)

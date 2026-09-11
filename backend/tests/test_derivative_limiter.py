@@ -4,7 +4,32 @@ from time import monotonic
 from types import SimpleNamespace
 
 from app.collectors.derivatives import _status_retry_delay
-from app.exchanges.derivatives import BinanceDerivativeScheduler
+from app.exchanges.derivatives import (
+    BinanceDerivativeScheduler,
+    OkxDerivativeScheduler,
+    OkxDerivativesProvider,
+)
+from app.models import Exchange, MarketInstrument, MarketType
+
+
+class OkxSnapshotClient:
+    def __init__(self) -> None:
+        self.active_symbols: set[str] = set()
+        self.peak_active_groups = 0
+
+    async def get_json(self, url: str) -> object:
+        symbol = url.rsplit("instId=", maxsplit=1)[-1]
+        if "open-interest" in url:
+            self.active_symbols.add(symbol)
+            self.peak_active_groups = max(self.peak_active_groups, len(self.active_symbols))
+            await asyncio.sleep(0)
+            return {"code": "0", "data": [{"oi": "1", "oiUsd": "100", "ts": "1"}]}
+        if "funding-rate" in url:
+            await asyncio.sleep(0)
+            return {"code": "0", "data": [{"fundingRate": "0.01"}]}
+        self.active_symbols.remove(symbol)
+        await asyncio.sleep(0)
+        return {"code": "0", "data": [{"markPx": "100", "ts": "1"}]}
 
 
 class BinanceDerivativeSchedulerTests(unittest.IsolatedAsyncioTestCase):
@@ -66,6 +91,33 @@ class BinanceDerivativeSchedulerTests(unittest.IsolatedAsyncioTestCase):
             _status_retry_delay(SimpleNamespace(status=418, headers={"Retry-After": "1"}), 2),
             60,
         )
+
+    async def test_shared_okx_scheduler_serializes_snapshot_groups(self) -> None:
+        client = OkxSnapshotClient()
+        scheduler = OkxDerivativeScheduler(2, cadence_seconds=0)
+        providers = [
+            OkxDerivativesProvider(client, scheduler),
+            OkxDerivativesProvider(client, scheduler),
+        ]
+        instruments = [
+            MarketInstrument(
+                exchange=Exchange.OKX,
+                symbol=f"{symbol}USDT",
+                market=MarketType.PERP,
+                exchange_symbol=f"{symbol}-USDT-SWAP",
+            )
+            for symbol in ("BTC", "ETH")
+        ]
+
+        await asyncio.gather(
+            *(
+                provider.snapshot(instrument)
+                for provider, instrument in zip(providers, instruments, strict=True)
+            )
+        )
+
+        self.assertEqual(client.peak_active_groups, 1)
+        self.assertEqual(client.active_symbols, set())
 
 
 if __name__ == "__main__":

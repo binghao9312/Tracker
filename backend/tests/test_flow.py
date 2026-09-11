@@ -32,6 +32,30 @@ class RollingTradeFlowTests(unittest.TestCase):
         self.assertEqual(windows[60].buy_sell_ratio, 1.5)
         self.assertEqual(windows[300].cvd, 120)
 
+    def test_requested_windows_include_the_cutoff_and_omit_unrequested_horizons(self) -> None:
+        flow = RollingTradeFlow()
+        flow.add_trade(trade(10_000, "BUY", 10))
+        flow.add_trade(trade(20_000, "SELL", 20))
+        flow.add_trade(trade(70_000, "BUY", 30))
+
+        windows = flow.windows(70_000, requested_seconds=(60, 300))
+
+        self.assertEqual(set(windows), {60, 300})
+        self.assertEqual(windows[60].buy_volume, 40)
+        self.assertEqual(windows[60].sell_volume, 20)
+        self.assertEqual(windows[300].cvd, 20)
+
+    def test_out_of_order_trades_do_not_break_reverse_window_scan(self) -> None:
+        flow = RollingTradeFlow()
+        flow.add_trade(trade(200_000, "BUY", 100))
+        flow.add_trade(trade(100_000, "SELL", 40))
+        flow.add_trade(trade(150_000, "SELL", 20))
+
+        window = flow.windows(250_000, requested_seconds=(60,))[60]
+
+        self.assertEqual(window.buy_volume, 100)
+        self.assertEqual(window.sell_volume, 0)
+
     def test_pressure_uses_opposing_depth(self) -> None:
         self.assertEqual(pressure(300_000, 50_000), 6)
         self.assertIsNone(pressure(1, 0))

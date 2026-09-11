@@ -134,9 +134,7 @@ class MultiplexManagerRegressionTests(unittest.IsolatedAsyncioTestCase):
                     on_book,
                 )._synchronize_and_stream(stop)
                 trade_session = FakeSession([FakeWebSocket([])])
-                await BinanceTradeManager(
-                    trade_session, market, [binance], on_trade
-                )._stream(stop)
+                await BinanceTradeManager(trade_session, market, [binance], on_trade)._stream(stop)
 
                 self.assertEqual(book_session.urls, [depth_url])
                 self.assertEqual(trade_session.urls, [trade_url])
@@ -464,7 +462,6 @@ class MultiplexManagerRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(published[0].bids[0].price, 99.0)
         self.assertEqual(published[0].bids[0].quantity, 2.5)
 
-
     async def test_binance_snapshot_bootstrap_limits_concurrency(self) -> None:
         active = 0
         peak = 0
@@ -587,7 +584,6 @@ class RuntimeMultiplexTaskRegressionTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await runtime.stop()
 
-
     async def test_okx_book_managers_chunk_fifty_instruments_at_twenty_five(self) -> None:
         instruments = [
             instrument(
@@ -667,9 +663,7 @@ class RuntimeMultiplexTaskRegressionTests(unittest.IsolatedAsyncioTestCase):
                 await stop.wait()
 
         runtime = LiveRuntime(DashboardState([]), object(), session=object())
-        with patch(
-            "app.runtime.BinanceOrderBookManager", RecordingBinanceOrderBookManager
-        ):
+        with patch("app.runtime.BinanceOrderBookManager", RecordingBinanceOrderBookManager):
             tasks = runtime._stream_tasks(
                 Exchange.BINANCE,
                 MarketType.PERP,
@@ -691,6 +685,7 @@ class RuntimeMultiplexTaskRegressionTests(unittest.IsolatedAsyncioTestCase):
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+
 
 if __name__ == "__main__":
     unittest.main()

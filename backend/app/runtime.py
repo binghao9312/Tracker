@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import defaultdict, deque
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from time import time_ns
 from typing import Any
 
@@ -25,6 +27,7 @@ from app.exchanges.binance import BinanceAdapter
 from app.exchanges.derivatives import (
     BinanceDerivativeScheduler,
     BinanceDerivativesProvider,
+    OkxDerivativeScheduler,
     OkxDerivativesProvider,
 )
 from app.exchanges.okx import OkxAdapter
@@ -68,6 +71,7 @@ _OI_MIN_WINDOW_FRACTION = 0.75
 ORDERBOOK_STALE_AFTER_SECONDS = 10
 DERIVATIVE_STALE_AFTER_SECONDS = 60
 BINANCE_DERIVATIVE_CADENCE_SECONDS = 12
+_RUNTIME_WORKER_RESTART_SECONDS = 1.0
 
 
 class LiveRuntime:
@@ -106,6 +110,7 @@ class LiveRuntime:
         self._derivative_states: dict[tuple[Exchange, str], str] = {}
         self._derivative_watermarks: dict[tuple[Exchange, str], int] = {}
         self._binance_derivative_scheduler: BinanceDerivativeScheduler | None = None
+        self._okx_derivative_scheduler: OkxDerivativeScheduler | None = None
         self._binance_snapshot_scheduler = BinanceSnapshotScheduler()
         self.discovered_markets: list[MarketInstrument] = []
 
@@ -133,12 +138,14 @@ class LiveRuntime:
                 self._tasks.extend(self._stream_tasks(exchange, market, instruments, adapters))
             perp_instruments = [m for m in result.markets if m.market is MarketType.PERP]
             binance_perps = [m for m in perp_instruments if m.exchange is Exchange.BINANCE]
+            okx_perps = [m for m in perp_instruments if m.exchange is Exchange.OKX]
             self._binance_derivative_scheduler = BinanceDerivativeScheduler(
                 len(binance_perps), cadence_seconds=BINANCE_DERIVATIVE_CADENCE_SECONDS
             )
+            self._okx_derivative_scheduler = OkxDerivativeScheduler(len(okx_perps))
             for index, instrument in enumerate(perp_instruments):
                 self._tasks.append(self._derivative_task(instrument, index=index))
-            self._tasks.append(asyncio.create_task(self._run_cadence(), name="metric-cadence"))
+            self._tasks.append(self._supervised_task(self._run_cadence, name="metric-cadence"))
         except BaseException:
             await self.stop()
             raise
@@ -154,10 +161,37 @@ class LiveRuntime:
             await self._session.close()
             self._session = None
 
+    def _supervised_task(
+        self, worker: Callable[[], Awaitable[None]], *, name: str
+    ) -> asyncio.Task[None]:
+        return asyncio.create_task(self._supervise_worker(worker, name), name=name)
+
+    async def _supervise_worker(self, worker: Callable[[], Awaitable[None]], name: str) -> None:
+        while not self._stop.is_set():
+            try:
+                await worker()
+                if self._stop.is_set():
+                    return
+                logger.error("runtime_worker_returned: %s", name)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("runtime_worker_failed: %s", name)
+            if await self._wait_for_stop_or_timeout(_RUNTIME_WORKER_RESTART_SECONDS):
+                return
+
+    async def _wait_for_stop_or_timeout(self, timeout: float) -> bool:
+        try:
+            await asyncio.wait_for(self._stop.wait(), timeout=timeout)
+        except TimeoutError:
+            return False
+        return True
+
     async def on_trade(self, trade: NormalizedTrade) -> None:
         key = (trade.exchange, trade.symbol, trade.market)
         self._flows.setdefault(key, RollingTradeFlow()).add_trade(trade)
         self._dirty_symbols.add(trade.symbol)
+
     async def on_order_book(self, book: OrderBook) -> None:
         key = (book.exchange, book.symbol, book.market)
         self._known_book_keys.add(key)
@@ -208,11 +242,9 @@ class LiveRuntime:
         batch_markets: list[dict[str, Any]] = []
         batch_flows: list[dict[str, Any]] = []
         batch_derivatives: list[dict[str, Any]] = []
-        metrics_by_symbol: dict[str, dict[tuple[Exchange, MarketType], LiquidityMetrics]] = {}
-        for symbol in active_symbols:
-            metrics_by_book = await self._collect_liquidities(symbol, batch=batch_markets)
-            if metrics_by_book:
-                metrics_by_symbol[symbol] = metrics_by_book
+        metrics_by_symbol = await self._collect_liquidities(
+            set(active_symbols), batch=batch_markets
+        )
         fragilities = liquidity_fragility_scores(
             {symbol: list(metrics.values()) for symbol, metrics in metrics_by_symbol.items()}
         )
@@ -230,6 +262,7 @@ class LiveRuntime:
             flows=batch_flows,
             derivatives=batch_derivatives,
         )
+
     async def _run_cadence(self) -> None:
         cycles = 0
         while not self._stop.is_set():
@@ -251,6 +284,7 @@ class LiveRuntime:
             return 0
         cutoff = datetime.now(UTC) - timedelta(hours=self._retention_hours)
         return await self.metrics.prune_metrics(cutoff)
+
     async def _persist_metrics_batch(
         self,
         *,
@@ -281,9 +315,7 @@ class LiveRuntime:
         return {key: value for key, value in row.items() if not key.startswith("_")}
 
     @staticmethod
-    def _advance_watermarks(
-        rows: list[dict[str, Any]], watermarks: dict[Any, int]
-    ) -> None:
+    def _advance_watermarks(rows: list[dict[str, Any]], watermarks: dict[Any, int]) -> None:
         for row in rows:
             key = row.get("_watermark_key")
             timestamp = row.get("_source_timestamp")
@@ -313,17 +345,17 @@ class LiveRuntime:
         if exchange is Exchange.BINANCE:
             if not isinstance(adapter, BinanceAdapter):
                 raise RuntimeError("Binance stream manager has the wrong adapter")
-            trade_manager = BinanceTradeManager(self._session, market, instruments, self.on_trade)
+            binance_trade_manager = BinanceTradeManager(
+                self._session, market, instruments, self.on_trade
+            )
             tasks = [
-                asyncio.create_task(
-                    trade_manager.run(self._stop),
+                self._supervised_task(
+                    partial(binance_trade_manager.run, self._stop),
                     name=f"trades:{exchange}:{market}",
                 )
             ]
-            for chunk_index, start in enumerate(
-                range(0, len(books), BINANCE_BOOK_CHUNK_SIZE)
-            ):
-                book_manager = BinanceOrderBookManager(
+            for chunk_index, start in enumerate(range(0, len(books), BINANCE_BOOK_CHUNK_SIZE)):
+                binance_book_manager = BinanceOrderBookManager(
                     self._session,
                     adapter,
                     market,
@@ -332,8 +364,8 @@ class LiveRuntime:
                     snapshot_scheduler=self._binance_snapshot_scheduler,
                 )
                 tasks.append(
-                    asyncio.create_task(
-                        book_manager.run(self._stop),
+                    self._supervised_task(
+                        partial(binance_book_manager.run, self._stop),
                         name=f"book:{exchange}:{market}:{chunk_index}",
                     )
                 )
@@ -341,67 +373,69 @@ class LiveRuntime:
 
         if not isinstance(adapter, OkxAdapter):
             raise RuntimeError("OKX stream manager has the wrong adapter")
-        trade_manager = OkxTradeManager(self._session, market, instruments, self.on_trade)
+        okx_trade_manager = OkxTradeManager(self._session, market, instruments, self.on_trade)
         tasks = [
-            asyncio.create_task(
-                trade_manager.run(self._stop),
+            self._supervised_task(
+                partial(okx_trade_manager.run, self._stop),
                 name=f"trades:{exchange}:{market}",
             )
         ]
         for chunk_index, start in enumerate(range(0, len(books), 25)):
-            book_manager = OkxOrderBookManager(
+            okx_book_manager = OkxOrderBookManager(
                 self._session, adapter, market, books[start : start + 25], self.on_order_book
             )
             tasks.append(
-                asyncio.create_task(
-                    book_manager.run(self._stop),
+                self._supervised_task(
+                    partial(okx_book_manager.run, self._stop),
                     name=f"book:{exchange}:{market}:{chunk_index}",
                 )
             )
         return tasks
 
-    def _derivative_task(
-        self, instrument: MarketInstrument, index: int = 0
-    ) -> asyncio.Task[None]:
+    def _derivative_task(self, instrument: MarketInstrument, index: int = 0) -> asyncio.Task[None]:
         if self._session is None:
             raise RuntimeError("runtime session is not initialized")
+        fetch: Callable[[], Awaitable[DerivativeSnapshot]]
+        interval: float
+        initial_delay: float
         if instrument.exchange is Exchange.BINANCE:
-            provider = BinanceDerivativesProvider(
+            binance_provider = BinanceDerivativesProvider(
                 AiohttpJsonClient(self._session),
                 self._binance_derivative_scheduler,
             )
-            interval = BINANCE_DERIVATIVE_CADENCE_SECONDS
+            fetch = partial(binance_provider.snapshot, instrument)
+            interval = float(BINANCE_DERIVATIVE_CADENCE_SECONDS)
             initial_delay = 0.0
         else:
-            provider = OkxDerivativesProvider(AiohttpJsonClient(self._session))
+            okx_provider = OkxDerivativesProvider(
+                AiohttpJsonClient(self._session), self._okx_derivative_scheduler
+            )
+            fetch = partial(okx_provider.snapshot, instrument)
             interval = 30.0
             initial_delay = (index % 10) * 1.5
         collector = DerivativePollingCollector(
-            lambda: provider.snapshot(instrument),
+            fetch,
             self.on_derivative,
             interval_seconds=interval,
             initial_delay_seconds=initial_delay,
         )
-        return asyncio.create_task(
-            collector.run(self._stop),
+        return self._supervised_task(
+            partial(collector.run, self._stop),
             name=f"derivatives:{instrument.exchange}:{instrument.symbol}",
         )
 
     async def _collect_liquidities(
-        self, symbol: str, batch: list[dict[str, Any]] | None = None
-    ) -> dict[tuple[Exchange, MarketType], LiquidityMetrics]:
-        metrics_by_book: dict[tuple[Exchange, MarketType], LiquidityMetrics] = {}
-        for (exchange, book_symbol, market), book in self._books.items():
-            if book_symbol != symbol or not self._available_book(
-                exchange, book_symbol, market, book
-            ):
+        self, symbols: set[str], batch: list[dict[str, Any]] | None = None
+    ) -> dict[str, dict[tuple[Exchange, MarketType], LiquidityMetrics]]:
+        metrics_by_symbol: dict[str, dict[tuple[Exchange, MarketType], LiquidityMetrics]] = {}
+        for key, book in self._books.items():
+            exchange, symbol, market = key
+            if symbol not in symbols or not self._available_book(exchange, symbol, market, book):
                 continue
-            try:
-                liquidity = calculate_liquidity(book)
-            except ValueError:
+            liquidity = self._liquidity_for_book(book)
+            if liquidity is None:
                 continue
-            metrics_by_book[(exchange, market)] = liquidity
-            key = (exchange, symbol, market)
+            metrics_by_symbol.setdefault(symbol, {})[(exchange, market)] = liquidity
             if book.timestamp <= self._market_watermarks.get(key, -1):
                 continue
             metric_row = {
@@ -430,10 +464,19 @@ class LiveRuntime:
             if batch is not None:
                 batch.append(metric_row)
             else:
-                await self._persist_metrics_batch(
-                    markets=[metric_row], flows=[], derivatives=[]
-                )
-        return metrics_by_book
+                await self._persist_metrics_batch(markets=[metric_row], flows=[], derivatives=[])
+        return metrics_by_symbol
+
+    def _liquidity_for_book(self, book: OrderBook) -> LiquidityMetrics | None:
+        try:
+            metrics = calculate_liquidity(
+                book,
+                impact_notionals=(10_000, 50_000),
+                capital_percentages=(1, 2),
+            )
+        except ValueError:
+            metrics = None
+        return metrics
 
     async def _build_detail(
         self,
@@ -445,9 +488,7 @@ class LiveRuntime:
         batch_derivatives: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         market_flows = {
-            market: await self._persist_flow(
-                symbol, market, metrics_by_book, batch=batch_flows
-            )
+            market: await self._persist_flow(symbol, market, metrics_by_book, batch=batch_flows)
             for market in MarketType
         }
         spot = market_flows[MarketType.SPOT]
@@ -630,20 +671,16 @@ class LiveRuntime:
             "cvd_5m",
         )
         combined: dict[str, float | None] = {key: None for key in aggregate_keys}
-        pressure_volumes: dict[str, float | None] = {
-            key: None for key in aggregate_keys[:4]
-        }
+        pressure_volumes: dict[str, float | None] = {key: None for key in aggregate_keys[:4]}
         for exchange in Exchange:
             flow = self._flows.get((exchange, symbol, market))
             liquidity = liquidities.get((exchange, market))
             if flow is None:
                 continue
             now_ms = int(datetime.now(UTC).timestamp() * 1_000)
-            windows = flow.windows(now_ms)
+            windows = flow.windows(now_ms, requested_seconds=(60, 300))
             one, five = windows[60], windows[300]
-            buy_pressure_1m = (
-                pressure(one.buy_volume, liquidity.ask_depth_2) if liquidity else None
-            )
+            buy_pressure_1m = pressure(one.buy_volume, liquidity.ask_depth_2) if liquidity else None
             sell_pressure_1m = (
                 pressure(one.sell_volume, liquidity.bid_depth_2) if liquidity else None
             )
@@ -691,23 +728,15 @@ class LiveRuntime:
                 combined[f"{exchange.value}:{key}"] = value
             if liquidity is not None:
                 for key in pressure_volumes:
-                    pressure_volumes[key] = float(pressure_volumes[key] or 0) + float(
-                        values[key]
-                    )
+                    volume = values[key]
+                    if volume is not None:
+                        pressure_volumes[key] = float(pressure_volumes[key] or 0) + volume
         depth_ask = self._depth_for_market(symbol, market, "ask", liquidities=liquidities)
         depth_bid = self._depth_for_market(symbol, market, "bid", liquidities=liquidities)
-        combined["buy_pressure_1m"] = self._ratio(
-            pressure_volumes["buy_volume_1m"], depth_ask
-        )
-        combined["buy_pressure_5m"] = self._ratio(
-            pressure_volumes["buy_volume_5m"], depth_ask
-        )
-        combined["sell_pressure_1m"] = self._ratio(
-            pressure_volumes["sell_volume_1m"], depth_bid
-        )
-        combined["sell_pressure_5m"] = self._ratio(
-            pressure_volumes["sell_volume_5m"], depth_bid
-        )
+        combined["buy_pressure_1m"] = self._ratio(pressure_volumes["buy_volume_1m"], depth_ask)
+        combined["buy_pressure_5m"] = self._ratio(pressure_volumes["buy_volume_5m"], depth_ask)
+        combined["sell_pressure_1m"] = self._ratio(pressure_volumes["sell_volume_1m"], depth_bid)
+        combined["sell_pressure_5m"] = self._ratio(pressure_volumes["sell_volume_5m"], depth_bid)
         return combined
 
     def _preferred_price(
@@ -762,10 +791,7 @@ class LiveRuntime:
     def _derivative_is_fresh(self, snapshot: DerivativeSnapshot) -> bool:
         received_at = snapshot.received_at
         freshness_timestamp = snapshot.timestamp if received_at is None else received_at
-        if (
-            time_ns() // 1_000_000 - freshness_timestamp
-            <= DERIVATIVE_STALE_AFTER_SECONDS * 1_000
-        ):
+        if time_ns() // 1_000_000 - freshness_timestamp <= DERIVATIVE_STALE_AFTER_SECONDS * 1_000:
             return True
         key = (snapshot.exchange, snapshot.symbol)
         if self._derivative_states.get(key) != "stale":
@@ -798,14 +824,16 @@ class LiveRuntime:
         return (latest.open_interest - prior.open_interest) / prior.open_interest
 
     def _funding(self, symbol: str) -> float | None:
-        values = [
-            snapshot.funding_rate
-            for exchange in Exchange
-            if (snapshot := self._latest_derivative(exchange, symbol)) is not None
-            and self._derivative_is_fresh(snapshot)
-            and snapshot.funding_rate is not None
-        ]
-        return sum(values) / len(values) if values else None
+        funding_rates: list[float] = []
+        for exchange in Exchange:
+            snapshot = self._latest_derivative(exchange, symbol)
+            if (
+                snapshot is not None
+                and self._derivative_is_fresh(snapshot)
+                and snapshot.funding_rate is not None
+            ):
+                funding_rates.append(snapshot.funding_rate)
+        return sum(funding_rates) / len(funding_rates) if funding_rates else None
 
     def _depth_for_market(
         self,

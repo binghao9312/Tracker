@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from math import isfinite
@@ -33,12 +33,13 @@ class MetricRepository:
 
     async def append_derivative(self, values: Mapping[str, Any]) -> None:
         await self._append(DerivativeMetricRow(**values))
+
     async def append_batch(
         self,
         *,
-        markets: list[Mapping[str, Any]] | None = None,
-        flows: list[Mapping[str, Any]] | None = None,
-        derivatives: list[Mapping[str, Any]] | None = None,
+        markets: Sequence[Mapping[str, Any]] | None = None,
+        flows: Sequence[Mapping[str, Any]] | None = None,
+        derivatives: Sequence[Mapping[str, Any]] | None = None,
     ) -> None:
         if not markets and not flows and not derivatives:
             return
@@ -52,18 +53,19 @@ class MetricRepository:
 
     async def prune_metrics(self, before: datetime) -> int:
         """Delete aggregated metric rows older than the specified retention cutoff."""
-        total_deleted = 0
         async with self._sessions.begin() as session:
-            for row_type in (MarketMetricRow, FlowMetricRow, DerivativeMetricRow):
-                result = await session.execute(
-                    delete(row_type).where(row_type.timestamp < before)
-                )
-                total_deleted += result.rowcount or 0
-        return total_deleted
+            market = await session.execute(
+                delete(MarketMetricRow).where(MarketMetricRow.timestamp < before)
+            )
+            flow = await session.execute(
+                delete(FlowMetricRow).where(FlowMetricRow.timestamp < before)
+            )
+            derivative = await session.execute(
+                delete(DerivativeMetricRow).where(DerivativeMetricRow.timestamp < before)
+            )
+        return (market.rowcount or 0) + (flow.rowcount or 0) + (derivative.rowcount or 0)
 
-    async def history(
-        self, symbol: str, limit: int = 3_600
-    ) -> dict[str, list[dict[str, Any]]]:
+    async def history(self, symbol: str, limit: int = 3_600) -> dict[str, list[dict[str, Any]]]:
         async with self._sessions() as session:
             market = await session.scalars(
                 select(MarketMetricRow)
@@ -99,30 +101,55 @@ class MetricRepository:
         market: str | None = None,
     ) -> dict[str, list[dict[str, Any]]]:
         async with self._sessions() as session:
-
-            async def rows(
-                row_type: type[MarketMetricRow] | type[FlowMetricRow] | type[DerivativeMetricRow],
-                *,
-                filter_market: bool,
-            ) -> list[dict[str, Any]]:
-                conditions = [
-                    row_type.symbol == symbol,
-                    row_type.timestamp >= start_time,
-                    row_type.timestamp <= end_time,
-                ]
-                if exchange is not None:
-                    conditions.append(row_type.exchange == exchange)
-                if filter_market and market is not None:
-                    conditions.append(row_type.market == market)
-                result = await session.scalars(
-                    select(row_type).where(*conditions).order_by(row_type.timestamp)
+            market_statement = (
+                select(MarketMetricRow)
+                .where(
+                    MarketMetricRow.symbol == symbol,
+                    MarketMetricRow.timestamp >= start_time,
+                    MarketMetricRow.timestamp <= end_time,
                 )
-                return [_history_row_dict(row) for row in result.all()]
+                .order_by(MarketMetricRow.timestamp)
+            )
+            if exchange is not None:
+                market_statement = market_statement.where(MarketMetricRow.exchange == exchange)
+            if market is not None:
+                market_statement = market_statement.where(MarketMetricRow.market == market)
+            market_rows = await session.scalars(market_statement)
+
+            flow_statement = (
+                select(FlowMetricRow)
+                .where(
+                    FlowMetricRow.symbol == symbol,
+                    FlowMetricRow.timestamp >= start_time,
+                    FlowMetricRow.timestamp <= end_time,
+                )
+                .order_by(FlowMetricRow.timestamp)
+            )
+            if exchange is not None:
+                flow_statement = flow_statement.where(FlowMetricRow.exchange == exchange)
+            if market is not None:
+                flow_statement = flow_statement.where(FlowMetricRow.market == market)
+            flow_rows = await session.scalars(flow_statement)
+
+            derivative_statement = (
+                select(DerivativeMetricRow)
+                .where(
+                    DerivativeMetricRow.symbol == symbol,
+                    DerivativeMetricRow.timestamp >= start_time,
+                    DerivativeMetricRow.timestamp <= end_time,
+                )
+                .order_by(DerivativeMetricRow.timestamp)
+            )
+            if exchange is not None:
+                derivative_statement = derivative_statement.where(
+                    DerivativeMetricRow.exchange == exchange
+                )
+            derivative_rows = await session.scalars(derivative_statement)
 
             return {
-                "market": await rows(MarketMetricRow, filter_market=True),
-                "flow": await rows(FlowMetricRow, filter_market=True),
-                "derivative": await rows(DerivativeMetricRow, filter_market=False),
+                "market": [_history_row_dict(row) for row in market_rows.all()],
+                "flow": [_history_row_dict(row) for row in flow_rows.all()],
+                "derivative": [_history_row_dict(row) for row in derivative_rows.all()],
             }
 
     async def _append(self, row: MarketMetricRow | FlowMetricRow | DerivativeMetricRow) -> None:
@@ -285,8 +312,8 @@ class PaperTradeRepository:
 
 def _average(rows: list[dict[str, Any]], key: str) -> float:
     values = [_finite_number(row[key]) for row in rows if row.get(key) is not None]
-    values = [value for value in values if value is not None]
-    return sum(values) / len(values) if values else 0.0
+    finite_values = [value for value in values if value is not None]
+    return sum(finite_values) / len(finite_values) if finite_values else 0.0
 
 
 def _summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -334,6 +361,8 @@ def _bucket_number(value: object) -> Decimal | None:
 
 
 def _finite_number(value: object) -> float | None:
+    if not isinstance(value, (str, int, float, Decimal)):
+        return None
     try:
         number = float(value)
     except (TypeError, ValueError):
@@ -341,7 +370,7 @@ def _finite_number(value: object) -> float | None:
     return number if isfinite(number) else None
 
 
-def _finite_sum(values: object) -> float:
+def _finite_sum(values: Iterable[object]) -> float:
     return sum(value for item in values if (value := _finite_number(item)) is not None)
 
 

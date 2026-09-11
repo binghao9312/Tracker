@@ -41,6 +41,7 @@ class LocalOrderBook:
     @property
     def sequence(self) -> int | None:
         return self._sequence
+
     @property
     def symbol(self) -> str:
         if self._snapshot is None:
@@ -122,12 +123,10 @@ class LocalOrderBook:
             timestamp=timestamp,
             received_at=received_at,
             bids=[
-                PriceLevel(price=float(price), quantity=float(quantity))
-                for price, quantity in bids
+                PriceLevel(price=float(price), quantity=float(quantity)) for price, quantity in bids
             ],
             asks=[
-                PriceLevel(price=float(price), quantity=float(quantity))
-                for price, quantity in asks
+                PriceLevel(price=float(price), quantity=float(quantity)) for price, quantity in asks
             ],
         )
 

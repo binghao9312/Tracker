@@ -1,5 +1,6 @@
 import unittest
 from time import time_ns
+from unittest.mock import patch
 
 from app.api import DashboardState
 from app.discovery import DiscoveryResult
@@ -99,9 +100,7 @@ class RuntimePipelineTests(unittest.IsolatedAsyncioTestCase):
             await runtime.flush()
         self.assertEqual(len(metrics.market), 1)
 
-        updated = book.model_copy(
-            update={"timestamp": now_ms + 1, "received_at": now_ms + 1}
-        )
+        updated = book.model_copy(update={"timestamp": now_ms + 1, "received_at": now_ms + 1})
         await runtime.on_order_book(updated)
         await runtime.flush()
         self.assertEqual(len(metrics.market), 2)
@@ -309,6 +308,25 @@ class RuntimePipelineTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIs(runtime._latest_derivative(Exchange.BINANCE, "BTCUSDT"), latest)
+
+    async def test_supervisor_restarts_unexpected_worker_return(self) -> None:
+        runtime = LiveRuntime(DashboardState([]), MemoryMetrics())
+        calls = 0
+
+        async def worker() -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                runtime._stop.set()
+
+        with (
+            patch.object(runtime, "_wait_for_stop_or_timeout", return_value=False),
+            self.assertLogs("app.runtime", "ERROR") as logs,
+        ):
+            await runtime._supervise_worker(worker, "test-worker")
+
+        self.assertEqual(calls, 2)
+        self.assertIn("runtime_worker_returned: test-worker", logs.output[0])
 
     async def test_stop_cancels_runtime_cadence_task(self) -> None:
         state = DashboardState([UniverseAsset(rank=1, symbol="BTC", name="Bitcoin")])

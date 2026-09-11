@@ -36,6 +36,21 @@ class ReplayTrades:
         }
 
 
+class OpenReplayTrades:
+    async def get_trade(self, _: int) -> dict:
+        return {
+            "id": 1,
+            "symbol": "BTCUSDT",
+            "exchange": "okx",
+            "market": "perp",
+            "status": "OPEN",
+            "opened_at": datetime(2025, 1, 1, tzinfo=UTC).isoformat(),
+            "closed_at": None,
+            "signal_snapshot": {},
+            "exit_snapshot": None,
+        }
+
+
 class ReplayApiRegressionTests(unittest.TestCase):
     def test_replay_filters_history_to_execution_market_and_returns_milliseconds(self) -> None:
         state = DashboardState([UniverseAsset(rank=1, symbol="BTC", name="Bitcoin")])
@@ -50,3 +65,26 @@ class ReplayApiRegressionTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(history.args[1], {"exchange": "okx", "market": "perp"})
         self.assertIsInstance(response.json()["history"]["market"][0]["timestamp"], int)
+
+    def test_open_replay_uses_utc_now_and_preserves_envelope(self) -> None:
+        state = DashboardState([UniverseAsset(rank=1, symbol="BTC", name="Bitcoin")])
+        history = ReplayMetrics()
+        client = TestClient(
+            create_app(state, history_repository=history, paper_repository=OpenReplayTrades())
+        )
+        before = datetime.now(UTC)
+
+        response = client.get("/api/paper/trades/1")
+
+        after = datetime.now(UTC)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            set(response.json()), {"trade", "entry_snapshot", "exit_snapshot", "history"}
+        )
+        self.assertIsNone(response.json()["exit_snapshot"])
+        self.assertEqual(response.json()["trade"]["status"], "OPEN")
+        end = history.args[0][2]
+        self.assertIsInstance(end, datetime)
+        self.assertEqual(end.tzinfo, UTC)
+        self.assertGreaterEqual(end, before)
+        self.assertLessEqual(end, after)

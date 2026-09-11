@@ -26,39 +26,54 @@ class RollingTradeFlow:
         self._trades: deque[NormalizedTrade] = deque()
 
     def add_trade(self, trade: NormalizedTrade) -> None:
-        self._trades.append(trade)
-        self.prune(trade.timestamp)
+        if not self._trades or trade.timestamp >= self._trades[-1].timestamp:
+            self._trades.append(trade)
+        else:
+            for offset, existing in enumerate(reversed(self._trades)):
+                if existing.timestamp <= trade.timestamp:
+                    self._trades.insert(len(self._trades) - offset, trade)
+                    break
+            else:
+                self._trades.appendleft(trade)
+        self.prune(self._trades[-1].timestamp)
 
     def prune(self, timestamp_ms: int) -> None:
         cutoff = timestamp_ms - 3_600_000
         while self._trades and self._trades[0].timestamp < cutoff:
             self._trades.popleft()
 
-    def windows(self, timestamp_ms: int) -> dict[int, FlowWindow]:
+    def windows(
+        self, timestamp_ms: int, requested_seconds: tuple[int, ...] | None = None
+    ) -> dict[int, FlowWindow]:
         self.prune(timestamp_ms)
+        seconds = WINDOWS_SECONDS if requested_seconds is None else requested_seconds
+        if any(window not in WINDOWS_SECONDS for window in seconds):
+            raise ValueError("requested flow window is unsupported")
+        cutoffs = {window: timestamp_ms - window * 1_000 for window in seconds}
+        buy_volumes = {window: 0.0 for window in seconds}
+        sell_volumes = {window: 0.0 for window in seconds}
+        oldest_cutoff = min(cutoffs.values(), default=timestamp_ms)
+        for trade in reversed(self._trades):
+            if trade.timestamp < oldest_cutoff:
+                break
+            volumes = buy_volumes if trade.side == "BUY" else sell_volumes
+            for window, cutoff in cutoffs.items():
+                if trade.timestamp >= cutoff:
+                    volumes[window] += trade.quote_value
         return {
-            seconds: self._window(timestamp_ms - seconds * 1_000) for seconds in WINDOWS_SECONDS
+            window: FlowWindow(
+                buy_volume=buy_volumes[window],
+                sell_volume=sell_volumes[window],
+                delta=buy_volumes[window] - sell_volumes[window],
+                buy_sell_ratio=(
+                    None
+                    if sell_volumes[window] == 0
+                    else buy_volumes[window] / sell_volumes[window]
+                ),
+                cvd=buy_volumes[window] - sell_volumes[window],
+            )
+            for window in seconds
         }
-
-    def _window(self, cutoff: int) -> FlowWindow:
-        buy_volume = sum(
-            trade.quote_value
-            for trade in self._trades
-            if trade.timestamp >= cutoff and trade.side == "BUY"
-        )
-        sell_volume = sum(
-            trade.quote_value
-            for trade in self._trades
-            if trade.timestamp >= cutoff and trade.side == "SELL"
-        )
-        delta = buy_volume - sell_volume
-        return FlowWindow(
-            buy_volume=buy_volume,
-            sell_volume=sell_volume,
-            delta=delta,
-            buy_sell_ratio=None if sell_volume == 0 else buy_volume / sell_volume,
-            cvd=delta,
-        )
 
 
 def pressure(aggressive_volume: float, opposing_depth: float) -> float | None:

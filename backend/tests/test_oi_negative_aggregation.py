@@ -82,7 +82,6 @@ class NegativeOpenInterestAggregationTests(unittest.IsolatedAsyncioTestCase):
             (-0.2, -0.2, -0.2),
         )
 
-
     async def test_stale_binance_derivative_is_hidden_while_fresh_okx_remains_usable(self) -> None:
         state = DashboardState([UniverseAsset(rank=1, symbol="BTC", name="Bitcoin")])
         runtime = LiveRuntime(state, Metrics())
@@ -144,6 +143,7 @@ class NegativeOpenInterestAggregationTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIsNone(detail["derivatives"]["binance"]["open_interest"])
+
 
 if __name__ == "__main__":
     unittest.main()

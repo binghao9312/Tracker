@@ -42,9 +42,10 @@ class OkxAdapter(ExchangeAdapter):
             raise ValueError("OKX response is not an object")
         if payload.get("code") == "50011":
             raise ValueError("OKX rate limit reached (50011)")
-        if payload.get("code") != "0" or not isinstance(payload.get("data"), list):
+        data = payload.get("data")
+        if payload.get("code") != "0" or not isinstance(data, list):
             raise ValueError("OKX instruments response is invalid")
-        return [item for item in payload["data"] if isinstance(item, dict)]
+        return [item for item in data if isinstance(item, dict)]
 
     def _parse_spot(self, payload: object) -> list[MarketInstrument]:
         instruments: list[MarketInstrument] = []
@@ -85,7 +86,7 @@ class OkxAdapter(ExchangeAdapter):
                 continue
             try:
                 symbol = normalize_okx_instrument(instrument_id, MarketType.PERP)
-                multiplier = float(item["ctVal"])
+                multiplier = _number(item["ctVal"])
             except (KeyError, TypeError, ValueError):
                 continue
             if multiplier <= 0 or item.get("ctValCcy") != instrument_id.split("-")[0]:
@@ -116,8 +117,8 @@ class OkxAdapter(ExchangeAdapter):
             raise ValueError("OKX depth snapshot is invalid")
         record = records[0]
         try:
-            sequence = int(record["seqId"])
-            timestamp = int(record["ts"])
+            sequence = _integer(record["seqId"])
+            timestamp = _integer(record["ts"])
         except (KeyError, TypeError, ValueError) as error:
             raise ValueError("OKX depth snapshot has invalid sequencing") from error
         quantity_multiplier = (
@@ -156,3 +157,18 @@ class OkxAdapter(ExchangeAdapter):
                 raise ValueError("OKX depth level is not numeric") from error
             levels.append((price, quantity))
         return levels
+
+
+def _number(value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        raise TypeError("OKX numeric value has an unsupported type")
+    return float(value)
+
+
+def _integer(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        raise TypeError("OKX integer value has an unsupported type")
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError("OKX integer value is invalid") from error

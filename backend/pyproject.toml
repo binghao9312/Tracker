@@ -22,7 +22,10 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+  # Pydantic-maintained TestClient dependency.
   "httpx2>=2.12,<3",
+  "mypy>=1.14,<2",
+  "types-PyYAML>=6.0.12.20250915,<7",
   "pytest>=8.3,<9",
   "ruff>=0.9,<1",
 ]

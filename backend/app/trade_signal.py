@@ -53,10 +53,18 @@ def load_trade_signal_thresholds(path: Path) -> TradeSignalThresholds:
     missing = required - values.keys()
     if missing:
         raise ValueError(f"trade_signal configuration is missing: {', '.join(sorted(missing))}")
-    try:
-        return TradeSignalThresholds(**dict(values))
-    except TypeError as exc:
-        raise ValueError("trade_signal configuration has unsupported values") from exc
+    if values.keys() - required:
+        raise ValueError("trade_signal configuration has unsupported values")
+    pressure = _nonnegative_float("pressure", values["pressure"])
+    pressure_dominance_ratio = _finite_float(
+        "pressure_dominance_ratio", values["pressure_dominance_ratio"]
+    )
+    if pressure_dominance_ratio < 1:
+        raise ValueError("pressure_dominance_ratio must be at least 1")
+    delta_ratio = _finite_float("delta_ratio", values["delta_ratio"])
+    if not 0 <= delta_ratio <= 1:
+        raise ValueError("delta_ratio must be between 0 and 1")
+    return TradeSignalThresholds(pressure, pressure_dominance_ratio, delta_ratio)
 
 
 def _finite_float(field: str, value: object) -> float:

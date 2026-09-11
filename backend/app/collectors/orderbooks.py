@@ -77,9 +77,7 @@ class BinanceSnapshotScheduler:
         retry_after = _retry_after_seconds(error)
         async with self._lock:
             delay = (
-                max(retry_after, 60.0)
-                if error.status == 418
-                else max(retry_after, self._backoff)
+                max(retry_after, 60.0) if error.status == 418 else max(retry_after, self._backoff)
             )
             self._blocked_until = max(self._blocked_until, monotonic() + delay)
             if error.status == 429:
@@ -114,6 +112,13 @@ class _ResyncingCollector:
                 logger.warning(
                     "orderbook_collector_resync",
                     extra={"collector": type(self).__name__, "error": str(error)},
+                )
+                await self._sleep_or_stop(stop, delay)
+                delay = min(delay * 2, 30.0)
+            except Exception:
+                logger.exception(
+                    "orderbook_collector_unexpected",
+                    extra={"collector": type(self).__name__},
                 )
                 await self._sleep_or_stop(stop, delay)
                 delay = min(delay * 2, 30.0)
@@ -154,6 +159,7 @@ class _OrderBookManager:
             raise ValueError("order book manager instruments must share a market")
         self._on_update = on_update
         self._last_published_ms: dict[str, int] = {}
+
     async def run(self, stop: asyncio.Event) -> None:
         delay = 1.0
         while not stop.is_set():
@@ -169,6 +175,15 @@ class _OrderBookManager:
                     "orderbook_chunk_resync: %s: %s",
                     task.get_name() if task is not None else self._market.value,
                     error,
+                )
+                await self._sleep_or_stop(stop, delay)
+                delay = min(delay * 2, 30.0)
+            except Exception:
+                await self._mark_unavailable()
+                task = asyncio.current_task()
+                logger.exception(
+                    "orderbook_chunk_unexpected: %s",
+                    task.get_name() if task is not None else self._market.value,
                 )
                 await self._sleep_or_stop(stop, delay)
                 delay = min(delay * 2, 30.0)
@@ -210,6 +225,7 @@ class _OrderBookManager:
                 )
             )
 
+
 class BinanceOrderBookManager(_OrderBookManager):
     """Synchronize one Binance market group from a combined depth stream."""
 
@@ -235,9 +251,7 @@ class BinanceOrderBookManager(_OrderBookManager):
             )
             book.bootstrap(snapshot)
 
-        tasks = [
-            asyncio.create_task(fetch(instrument, book)) for instrument, book in entries
-        ]
+        tasks = [asyncio.create_task(fetch(instrument, book)) for instrument, book in entries]
         try:
             await asyncio.gather(*tasks)
         except BaseException:
@@ -245,6 +259,7 @@ class BinanceOrderBookManager(_OrderBookManager):
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             raise
+
     async def _synchronize_and_stream(self, stop: asyncio.Event) -> None:
         host = (
             "stream.binance.com:9443" if self._market is MarketType.SPOT else "fstream.binance.com"
@@ -321,9 +336,7 @@ class BinanceOrderBookManager(_OrderBookManager):
                     raise ValueError("invalid Binance depth update") from error
                 is_initial = first_increment[exchange_symbol]
                 first_increment[exchange_symbol] = False
-                await self._publish(
-                    book, source_timestamp=source_timestamp, force=is_initial
-                )
+                await self._publish(book, source_timestamp=source_timestamp, force=is_initial)
         if not stop.is_set():
             raise ConnectionError("Binance WebSocket disconnected")
 
@@ -411,28 +424,18 @@ class OkxOrderBookManager(_OrderBookManager):
                         raise ValueError("invalid OKX depth update")
                     try:
                         sequence = _integer(update, "seqId")
-                        previous_sequence = None if is_snapshot else _integer(update, "prevSeqId")
-                        if (
-                            not is_snapshot
-                            and book.sequence is not None
-                            and previous_sequence != book.sequence
-                            and sequence <= book.sequence
-                        ):
-                            continue
-                        bids = _depth_levels(
-                            update.get("bids"),
-                            quantity_multiplier=instrument.base_quantity_multiplier,
-                        )
-                        asks = _depth_levels(
-                            update.get("asks"),
-                            quantity_multiplier=instrument.base_quantity_multiplier,
-                        )
-                        source_timestamp = (
-                            _integer(update, "ts")
-                            if "ts" in update
-                            else time_ns() // 1_000_000
-                        )
                         if is_snapshot:
+                            bids = _depth_levels(
+                                update.get("bids"),
+                                quantity_multiplier=instrument.base_quantity_multiplier,
+                            )
+                            asks = _depth_levels(
+                                update.get("asks"),
+                                quantity_multiplier=instrument.base_quantity_multiplier,
+                            )
+                            source_timestamp = (
+                                _integer(update, "ts") if "ts" in update else time_ns() // 1_000_000
+                            )
                             book.bootstrap(
                                 SequencedOrderBookSnapshot(
                                     exchange=instrument.exchange,
@@ -445,6 +448,24 @@ class OkxOrderBookManager(_OrderBookManager):
                                 )
                             )
                         else:
+                            previous_sequence = _integer(update, "prevSeqId")
+                            if (
+                                book.sequence is not None
+                                and previous_sequence != book.sequence
+                                and sequence <= book.sequence
+                            ):
+                                continue
+                            bids = _depth_levels(
+                                update.get("bids"),
+                                quantity_multiplier=instrument.base_quantity_multiplier,
+                            )
+                            asks = _depth_levels(
+                                update.get("asks"),
+                                quantity_multiplier=instrument.base_quantity_multiplier,
+                            )
+                            source_timestamp = (
+                                _integer(update, "ts") if "ts" in update else time_ns() // 1_000_000
+                            )
                             book.apply_okx_update(
                                 sequence=sequence,
                                 previous_sequence=previous_sequence,
@@ -453,9 +474,7 @@ class OkxOrderBookManager(_OrderBookManager):
                             )
                     except (KeyError, ValueError, InvalidOperation) as error:
                         raise ValueError("invalid OKX depth update") from error
-                    await self._publish(
-                        book, source_timestamp=source_timestamp, force=is_snapshot
-                    )
+                    await self._publish(book, source_timestamp=source_timestamp, force=is_snapshot)
         if not stop.is_set():
             raise ConnectionError("OKX WebSocket disconnected")
 
@@ -472,9 +491,12 @@ def _json_object(raw: str) -> dict[str, object]:
 
 def _integer(data: dict[str, object], name: str) -> int:
     value = data.get(name)
-    if isinstance(value, bool):
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
         raise ValueError(f"{name} must be an integer")
-    return int(value)
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError(f"{name} must be an integer") from error
 
 
 def _depth_levels(

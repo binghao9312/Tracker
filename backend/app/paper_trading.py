@@ -42,6 +42,8 @@ def load_paper_trading_settings(path: Path) -> PaperTradingSettings:
     """Load the dedicated settings section while preserving safe defaults."""
     with path.open(encoding="utf-8") as file:
         configured = yaml.safe_load(file) or {}
+    if not isinstance(configured, Mapping):
+        raise ValueError("paper_trading configuration must be a mapping")
     values = configured.get("paper_trading", {})
     if not isinstance(values, Mapping):
         raise ValueError("paper_trading configuration must be a mapping")
@@ -214,7 +216,7 @@ class PaperTradingEngine:
                 "SIGNAL_TRIGGERED",
                 None,
                 None,
-                detail | {"trade_signal": signal.snapshot()},
+                dict(detail) | {"trade_signal": signal.snapshot()},
             )
         ]
         if symbol in self._positions:

@@ -42,6 +42,21 @@ class LiquidityMetricTests(unittest.TestCase):
         self.assertIsNone(metrics.buy_impacts[5_000])
         self.assertIsNone(metrics.capital_to_move_up[2])
 
+    def test_exactly_fillable_float_notional_is_not_reported_unavailable(self) -> None:
+        levels = [PriceLevel(price=1.0, quantity=0.1) for _ in range(10)]
+        book = OrderBook(
+            exchange=Exchange.BINANCE,
+            symbol="BTCUSDT",
+            market=MarketType.SPOT,
+            timestamp=1,
+            bids=levels,
+            asks=levels,
+        )
+
+        metrics = calculate_liquidity(book, impact_notionals=(1,))
+
+        self.assertAlmostEqual(metrics.buy_impacts[1], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

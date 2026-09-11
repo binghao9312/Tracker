@@ -17,6 +17,12 @@ class OrderBookCollectorParserTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             _depth_levels([["100"]])
 
+    def test_normalizes_missing_and_unsupported_integers_to_value_error(self) -> None:
+        for value in (None, [], object(), True):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    _integer({"sequence": value}, "sequence")
+
 
 if __name__ == "__main__":
     unittest.main()

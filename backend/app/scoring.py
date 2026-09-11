@@ -80,10 +80,17 @@ def load_data_retention_settings(path: Path) -> DataRetentionSettings:
     missing = required - values.keys()
     if missing:
         raise ValueError(f"data_retention configuration is missing: {', '.join(sorted(missing))}")
-    try:
-        return DataRetentionSettings(**dict(values))
-    except TypeError as exc:
-        raise ValueError("data_retention configuration has unsupported values") from exc
+    if values.keys() - required:
+        raise ValueError("data_retention configuration has unsupported values")
+    metric_history_days = values["metric_history_days"]
+    if (
+        isinstance(metric_history_days, bool)
+        or not isinstance(metric_history_days, int)
+        or metric_history_days < 1
+    ):
+        raise ValueError("metric_history_days must be an integer greater than or equal to 1")
+    return DataRetentionSettings(metric_history_days=metric_history_days)
+
 
 def load_classification_thresholds(path: Path) -> ClassificationThresholds:
     """Load validated classification thresholds from the scoring configuration."""
@@ -92,10 +99,18 @@ def load_classification_thresholds(path: Path) -> ClassificationThresholds:
     missing = required - values.keys()
     if missing:
         raise ValueError(f"classification configuration is missing: {', '.join(sorted(missing))}")
-    try:
-        return ClassificationThresholds(**dict(values))
-    except TypeError as exc:
-        raise ValueError("classification configuration has unsupported values") from exc
+    allowed = required | {"allow_missing_cvd"}
+    if values.keys() - allowed:
+        raise ValueError("classification configuration has unsupported values")
+    allow_missing_cvd = values.get("allow_missing_cvd", False)
+    if not isinstance(allow_missing_cvd, bool):
+        raise ValueError("allow_missing_cvd must be a boolean")
+    return ClassificationThresholds(
+        pressure=_nonnegative_float("pressure", values["pressure"]),
+        cvd=_nonnegative_float("cvd", values["cvd"]),
+        oi_change=_nonnegative_float("oi_change", values["oi_change"]),
+        allow_missing_cvd=allow_missing_cvd,
+    )
 
 
 def _scoring_section(path: Path, section: str) -> Mapping[str, object]:
@@ -125,8 +140,10 @@ def classify_move(signal: MarketSignal, thresholds: ClassificationThresholds) ->
     perp_direction = _market_direction(
         signal.perp_buy_pressure, signal.perp_sell_pressure, signal.perp_cvd, thresholds
     )
-    perp_active = perp_direction is not _Direction.NONE and _above(
-        signal.oi_change, thresholds.oi_change
+    perp_active = (
+        perp_direction is not _Direction.NONE
+        and signal.oi_change is not None
+        and abs(signal.oi_change) >= thresholds.oi_change
     )
     if spot_direction is not _Direction.NONE and perp_active:
         return MoveType.MIXED if spot_direction is perp_direction else MoveType.NEUTRAL
@@ -261,21 +278,30 @@ def liquidity_fragility_scores(
 def _aggregate_liquidity(
     metrics: list[LiquidityMetrics],
 ) -> tuple[float, float, float, float, float] | None:
-    usable = [
-        metric
-        for metric in metrics
-        if metric.buy_impacts[10_000] is not None
-        and metric.buy_impacts[50_000] is not None
-        and metric.capital_to_move_up[2] is not None
-    ]
-    if not usable:
+    depth_2: list[float] = []
+    impact_10k: list[float] = []
+    impact_50k: list[float] = []
+    spread: list[float] = []
+    capital_to_move_2: list[float] = []
+    for metric in metrics:
+        buy_impact_10k = metric.buy_impacts[10_000]
+        buy_impact_50k = metric.buy_impacts[50_000]
+        capital_up_2 = metric.capital_to_move_up[2]
+        if buy_impact_10k is None or buy_impact_50k is None or capital_up_2 is None:
+            continue
+        depth_2.append(metric.bid_depth_2 + metric.ask_depth_2)
+        impact_10k.append(buy_impact_10k)
+        impact_50k.append(buy_impact_50k)
+        spread.append(metric.spread_percent)
+        capital_to_move_2.append(capital_up_2)
+    if not depth_2:
         return None
     return (
-        fmean(metric.bid_depth_2 + metric.ask_depth_2 for metric in usable),
-        fmean(float(metric.buy_impacts[10_000]) for metric in usable),
-        fmean(float(metric.buy_impacts[50_000]) for metric in usable),
-        fmean(metric.spread_percent for metric in usable),
-        fmean(float(metric.capital_to_move_up[2]) for metric in usable),
+        fmean(depth_2),
+        fmean(impact_10k),
+        fmean(impact_50k),
+        fmean(spread),
+        fmean(capital_to_move_2),
     )
 
 

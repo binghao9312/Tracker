@@ -46,6 +46,10 @@ class DerivativePollingCollector:
                 logger.warning("derivative_collector_retry: %s", error)
                 timeout = delay
                 delay = min(delay * 2, 300.0)
+            except Exception:
+                logger.exception("derivative_collector_unexpected")
+                timeout = delay
+                delay = min(delay * 2, 300.0)
             if await self._sleep_or_stop(stop, timeout):
                 return
 
