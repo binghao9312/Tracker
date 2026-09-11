@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections import defaultdict
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -16,6 +18,21 @@ from app.models import UniverseAsset
 from app.paper_trading import PaperTradingEngine
 from app.repository import MetricRepository, PaperTradeRepository
 from app.universe import JsonMarketUniverseProvider
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class QueuePolicy:
+    maxsize: int
+    drop_oldest: bool
+
+
+class SubscriberQueue(asyncio.Queue[dict[str, Any]]):
+    def __init__(self, maxsize: int, drop_oldest: bool) -> None:
+        super().__init__(maxsize=maxsize)
+        self.drop_oldest = drop_oldest
+        self.overflowed = False
 
 
 class ScannerRow(BaseModel):
@@ -89,7 +106,7 @@ class DashboardState:
         self._rank_by_symbol = {f"{asset.symbol}USDT": asset.rank for asset in universe}
         self._rows: dict[str, ScannerRow] = {}
         self._details: dict[str, dict[str, Any]] = {}
-        self._subscribers: dict[str, set[asyncio.Queue[dict[str, Any]]]] = defaultdict(set)
+        self._subscribers: dict[str, set[SubscriberQueue]] = defaultdict(set)
         self._lock = asyncio.Lock()
 
     async def update_symbol(self, symbol: str, detail: dict[str, Any]) -> None:
@@ -134,20 +151,56 @@ class DashboardState:
     def detail(self, symbol: str) -> dict[str, Any] | None:
         return self._details.get(symbol)
 
-    async def subscribe(self, channel: str) -> AsyncIterator[dict[str, Any]]:
-        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=1)
+    @staticmethod
+    def _policy_for(channel: str) -> QueuePolicy:
+        if channel == "paper":
+            return QueuePolicy(maxsize=256, drop_oldest=False)
+        return QueuePolicy(maxsize=1, drop_oldest=True)
+
+    async def subscribe(
+        self, channel: str, policy: QueuePolicy | None = None
+    ) -> AsyncIterator[dict[str, Any]]:
+        resolved_policy = policy if policy is not None else self._policy_for(channel)
+        queue = SubscriberQueue(
+            maxsize=resolved_policy.maxsize,
+            drop_oldest=resolved_policy.drop_oldest,
+        )
         self._subscribers[channel].add(queue)
         try:
             while True:
-                yield await queue.get()
+                if queue.overflowed and queue.empty():
+                    break
+                message = await queue.get()
+                yield message
+                if queue.overflowed and queue.empty():
+                    break
         finally:
             self._subscribers[channel].discard(queue)
 
     async def _broadcast(self, channel: str, message: dict[str, Any]) -> None:
         for queue in tuple(self._subscribers[channel]):
-            if queue.full():
-                queue.get_nowait()
-            queue.put_nowait(message)
+            if queue.drop_oldest:
+                if queue.full():
+                    try:
+                        queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        pass
+                try:
+                    queue.put_nowait(message)
+                except asyncio.QueueFull:
+                    pass
+            else:
+                if queue.full():
+                    queue.overflowed = True
+                    self._subscribers[channel].discard(queue)
+                    logger.warning("Subscriber dropped for overflow on channel '%s'", channel)
+                else:
+                    try:
+                        queue.put_nowait(message)
+                    except asyncio.QueueFull:
+                        queue.overflowed = True
+                        self._subscribers[channel].discard(queue)
+                        logger.warning("Subscriber dropped for overflow on channel '%s'", channel)
 
 
 def create_app(
