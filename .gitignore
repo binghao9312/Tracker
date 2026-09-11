@@ -43,3 +43,6 @@ frontend/dist/
 .idea/
 .DS_Store
 Thumbs.db
+
+# delegated-task specs and logs
+.agent-tasks/*.log
