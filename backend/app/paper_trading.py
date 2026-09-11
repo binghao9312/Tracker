@@ -304,7 +304,9 @@ class PaperTradingEngine:
     async def _maintain_position(
         self, position: dict[str, Any], detail: Mapping[str, Any], now: datetime
     ) -> dict[str, Any] | None:
-        reference_price = _reference_price(detail)
+        exchange = str(position["exchange"]) if position.get("exchange") is not None else None
+        market = str(position["market"]) if position.get("market") is not None else None
+        reference_price = _reference_price(detail, exchange=exchange, market=market)
         if reference_price is None:
             return None
         entry = position["entry_price"]
@@ -312,21 +314,20 @@ class PaperTradingEngine:
             1 if position["side"] == "LONG" else -1
         )
         position["max_favorable_excursion_pct"] = max(
-            position["max_favorable_excursion_pct"], signed_return
+            float(position["max_favorable_excursion_pct"]), signed_return
         )
         position["max_adverse_excursion_pct"] = min(
-            position["max_adverse_excursion_pct"], signed_return
+            float(position["max_adverse_excursion_pct"]), signed_return
         )
         elapsed = (now - _as_datetime(position["opened_at"])).total_seconds()
-        reason = (
-            "TAKE_PROFIT"
-            if signed_return >= self.settings.take_profit_pct
-            else "STOP_LOSS"
-            if signed_return <= -self.settings.stop_loss_pct
-            else "TIME_STOP"
-            if elapsed >= self.settings.max_holding_minutes * 60
-            else None
-        )
+        if position["max_adverse_excursion_pct"] <= -self.settings.stop_loss_pct:
+            reason = "STOP_LOSS"
+        elif signed_return >= self.settings.take_profit_pct:
+            reason = "TAKE_PROFIT"
+        elif elapsed >= self.settings.max_holding_minutes * 60:
+            reason = "TIME_STOP"
+        else:
+            reason = None
         if reason is None:
             await self.repository.close_trade(
                 position["id"],
@@ -336,36 +337,66 @@ class PaperTradingEngine:
                 },
             )
             return None
-        execution = _execution_book(
-            detail,
-            exchange=str(position["exchange"]),
-            market=str(position["market"]),
-        )
-        if execution is None:
-            return await self._event(
-                now,
-                position["symbol"],
-                "TRADE_SKIPPED",
-                "NO_EXECUTION_MARKET",
-                position["id"],
-                detail,
+        if reason == "STOP_LOSS" and signed_return > -self.settings.stop_loss_pct:
+            is_long = position["side"] == "LONG"
+            exit_price = (
+                entry * (1.0 - self.settings.stop_loss_pct)
+                if is_long
+                else entry * (1.0 + self.settings.stop_loss_pct)
             )
-        _, _, book = execution
-        try:
-            fill = simulate_market_fill(
-                book["bids"] if position["side"] == "LONG" else book["asks"],
-                side="SELL" if position["side"] == "LONG" else "BUY",
-                quantity=position["quantity"],
+            quantity = float(position["quantity"])
+            fill = SimulatedFill(
+                vwap=exit_price,
+                quantity=quantity,
+                quote_notional=exit_price * quantity,
+                slippage=0.0,
             )
-        except FillUnavailable as error:
-            return await self._event(
-                now, position["symbol"], "TRADE_SKIPPED", error.reason, position["id"], detail
-            )
+            is_modelled = True
+        else:
+            execution = _execution_book(detail, exchange=exchange, market=market)
+            if execution is None:
+                await self.repository.close_trade(
+                    position["id"],
+                    {
+                        "max_favorable_excursion_pct": position["max_favorable_excursion_pct"],
+                        "max_adverse_excursion_pct": position["max_adverse_excursion_pct"],
+                    },
+                )
+                return await self._event(
+                    now,
+                    position["symbol"],
+                    "TRADE_SKIPPED",
+                    "NO_EXECUTION_MARKET",
+                    position["id"],
+                    detail,
+                )
+            _, _, book = execution
+            try:
+                fill = simulate_market_fill(
+                    book["bids"] if position["side"] == "LONG" else book["asks"],
+                    side="SELL" if position["side"] == "LONG" else "BUY",
+                    quantity=position["quantity"],
+                )
+            except FillUnavailable as error:
+                await self.repository.close_trade(
+                    position["id"],
+                    {
+                        "max_favorable_excursion_pct": position["max_favorable_excursion_pct"],
+                        "max_adverse_excursion_pct": position["max_adverse_excursion_pct"],
+                    },
+                )
+                return await self._event(
+                    now, position["symbol"], "TRADE_SKIPPED", error.reason, position["id"], detail
+                )
+            is_modelled = False
         gross = (
             (fill.vwap - entry) * position["quantity"] * (1 if position["side"] == "LONG" else -1)
         )
         exit_fee = fill.quote_notional * self.settings.fee_bps / 10_000
         net = gross - position["entry_fee"] - exit_fee
+        exit_snapshot_data: dict[str, Any] = dict(detail) | {"exit_fill": asdict(fill)}
+        if is_modelled:
+            exit_snapshot_data["exit_modelled"] = "STOP_LOSS_BREACH"
         closed = await self.repository.close_trade(
             position["id"],
             {
@@ -380,7 +411,7 @@ class PaperTradingEngine:
                 "max_adverse_excursion_pct": position["max_adverse_excursion_pct"],
                 "exit_reason": reason,
                 "holding_seconds": elapsed,
-                "exit_snapshot": _json_safe(dict(detail) | {"exit_fill": asdict(fill)}),
+                "exit_snapshot": _json_safe(exit_snapshot_data),
             },
         )
         self._positions.pop(position["symbol"], None)
@@ -511,16 +542,18 @@ def _string(values: Mapping[str, Any], key: str) -> str | None:
     return value if isinstance(value, str) else None
 
 
-def _reference_price(detail: Mapping[str, Any]) -> float | None:
-    value = detail.get("price")
-    if isinstance(value, (int, float)) and value > 0:
-        return float(value)
-    execution = _execution_book(detail)
-    if execution:
+def _reference_price(
+    detail: Mapping[str, Any],
+    exchange: str | None = None,
+    market: str | None = None,
+) -> float | None:
+    execution = _execution_book(detail, exchange=exchange, market=market)
+    if execution is not None:
         _, _, book = execution
-        bids, asks = _levels(book["bids"]), _levels(book["asks"])
+        bids = _levels(book.get("bids"))
+        asks = _levels(book.get("asks"))
         if bids and asks:
-            return (bids[0][0] + asks[0][0]) / 2
+            return (bids[0][0] + asks[0][0]) / 2.0
     return None
 
 
