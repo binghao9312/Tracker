@@ -23,6 +23,7 @@ class FeedMetrics:
     gap_p99: float | None
     gap_max: float | None
     gaps_over_60s: int
+    source: str = ""
 
 
 def find_repo_root() -> Path:
@@ -216,7 +217,7 @@ def print_warnings(records: list[FeedMetrics]) -> None:
                     seen.add(feed_key)
                     ratio = r.gap_p50 / median_p50
                     warnings.append(
-                        f"WARNING: {r.exchange}/{r.market} gap_p50={r.gap_p50:.2f}s "
+                        f"WARNING: {r.source}: {r.exchange}/{r.market} gap_p50={r.gap_p50:.2f}s "
                         f"is {ratio:.1f}x the cross-feed median ({median_p50:.2f}s)"
                     )
 
@@ -270,9 +271,10 @@ def main(argv: list[str] | None = None) -> int:
         except subprocess.CalledProcessError as e:
             sys.stderr.write(f"Error querying {name}: {e.stderr}\n")
             records = []
+        for record in records:
+            record.source = name
         print_table(name, records)
-        if name == "market_metrics":
-            all_records = records
+        all_records.extend(records)
 
     print_warnings(all_records)
     return 0
