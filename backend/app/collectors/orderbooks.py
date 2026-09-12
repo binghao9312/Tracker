@@ -26,6 +26,25 @@ BINANCE_SNAPSHOT_CONCURRENCY = 3
 BINANCE_SNAPSHOT_MIN_INTERVAL_SECONDS = 0.25
 SnapshotFetcher = Callable[[], Awaitable[SequencedOrderBookSnapshot]]
 
+# Minimum gap between two published books for one symbol.
+#
+# Nothing consumes the publish *stream*: `Runtime.on_order_book` stores the book in
+# `self._books[key]`, overwriting whatever was there, and both the cadence loop and
+# the API read the latest stored value on demand. So this interval buys freshness
+# only, and every publish it allows costs a top-N selection plus ~400 pydantic
+# PriceLevel objects.
+#
+# At the previous 100ms, ~163 exchange-market-symbol pairs published at 10Hz, which
+# measured at ~1.1-1.5 cores of order-book work alone -- over budget for a
+# single-threaded event loop before anything else runs. At 250ms it is under 0.6.
+#
+# It has to stay comfortably below the 1s metric cadence: the cadence only writes a
+# market_metrics row when `book.timestamp` has passed the watermark, so an interval
+# at or above the cadence would intermittently drop rows. 250ms gives four publishes
+# per cadence tick. It also has to stay far below ORDERBOOK_STALE_AFTER_SECONDS (10s),
+# which it does by a factor of 40.
+ORDERBOOK_PUBLISH_MIN_INTERVAL_MS = 250
+
 
 class BinanceSnapshotScheduler:
     """Bound and pace every Binance depth bootstrap across all book chunks."""
@@ -204,7 +223,7 @@ class _OrderBookManager:
         received_at = time_ns() // 1_000_000
         if not force and book.sequence is not None:
             last_ms = self._last_published_ms.get(book.symbol, 0)
-            if received_at - last_ms < 100:
+            if received_at - last_ms < ORDERBOOK_PUBLISH_MIN_INTERVAL_MS:
                 return
             self._last_published_ms[book.symbol] = received_at
         await self._on_update(book.to_model(source_timestamp, received_at=received_at))

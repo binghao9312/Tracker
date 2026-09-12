@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import heapq
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -25,17 +25,19 @@ class SequencedOrderBookSnapshot:
     asks: list[tuple[Decimal, Decimal]]
 
 
+_RETAINED_LEVELS_PER_SIDE = 1_000
+_TRIM_TRIGGER_LEVELS_PER_SIDE = _RETAINED_LEVELS_PER_SIDE * 2
+
+
 class LocalOrderBook:
     """A RAM-only book that becomes unusable immediately on a sequence gap."""
-
-    _MAX_RETAINED_LEVELS = 1_000
 
     def __init__(self) -> None:
         self._snapshot: SequencedOrderBookSnapshot | None = None
         self._bids: dict[Decimal, Decimal] = {}
         self._asks: dict[Decimal, Decimal] = {}
-        self._bid_heap: list[Decimal] = []
-        self._ask_heap: list[Decimal] = []
+        self._bid_order: dict[Decimal, float] = {}
+        self._ask_order: dict[Decimal, float] = {}
         self._sequence: int | None = None
         self._synchronized = False
 
@@ -55,14 +57,9 @@ class LocalOrderBook:
 
     def bootstrap(self, snapshot: SequencedOrderBookSnapshot) -> None:
         self._snapshot = snapshot
-        self._bids = self._levels(snapshot.bids)
-        self._asks = self._levels(snapshot.asks)
-        self._bid_heap = list(self._bids)
-        self._ask_heap = [-price for price in self._asks]
-        heapq.heapify(self._bid_heap)
-        heapq.heapify(self._ask_heap)
-        self._trim_side(self._bids, self._bid_heap, asks=False)
-        self._trim_side(self._asks, self._ask_heap, asks=True)
+        self._bids, self._bid_order = self._levels(snapshot.bids)
+        self._asks, self._ask_order = self._levels(snapshot.asks)
+        self._trim_books()
         self._sequence = snapshot.sequence
         self._synchronized = True
 
@@ -79,8 +76,9 @@ class LocalOrderBook:
             return
         if first_sequence > current_sequence + 1:
             self._invalidate("Binance Spot depth sequence gap")
-        self._apply_side_levels(self._bids, self._bid_heap, bids, asks=False)
-        self._apply_side_levels(self._asks, self._ask_heap, asks, asks=True)
+        self._apply_levels(self._bids, self._bid_order, bids)
+        self._apply_levels(self._asks, self._ask_order, asks)
+        self._trim_books()
         self._sequence = final_sequence
 
     def apply_binance_futures_update(
@@ -101,8 +99,9 @@ class LocalOrderBook:
         )
         if not valid:
             self._invalidate("Binance Futures depth sequence gap")
-        self._apply_side_levels(self._bids, self._bid_heap, bids, asks=False)
-        self._apply_side_levels(self._asks, self._ask_heap, asks, asks=True)
+        self._apply_levels(self._bids, self._bid_order, bids)
+        self._apply_levels(self._asks, self._ask_order, asks)
+        self._trim_books()
         self._sequence = final_sequence
 
     def apply_okx_update(
@@ -115,8 +114,9 @@ class LocalOrderBook:
     ) -> None:
         if previous_sequence != self._require_sync():
             self._invalidate("OKX depth sequence gap")
-        self._apply_side_levels(self._bids, self._bid_heap, bids, asks=False)
-        self._apply_side_levels(self._asks, self._ask_heap, asks, asks=True)
+        self._apply_levels(self._bids, self._bid_order, bids)
+        self._apply_levels(self._asks, self._ask_order, asks)
+        self._trim_books()
         self._sequence = sequence
 
     def to_model(
@@ -125,8 +125,16 @@ class LocalOrderBook:
         snapshot = self._snapshot
         if snapshot is None or not self._synchronized:
             raise RuntimeError("local order book is not synchronized")
-        bids = self._top_levels(self._bids, max_levels, reverse=True)
-        asks = self._top_levels(self._asks, max_levels, reverse=False)
+        bids = (
+            self._top_levels(self._bids, self._bid_order, max_levels, reverse=True)
+            if max_levels
+            else self.bids
+        )
+        asks = (
+            self._top_levels(self._asks, self._ask_order, max_levels, reverse=False)
+            if max_levels
+            else self.asks
+        )
         return OrderBook(
             exchange=snapshot.exchange,
             symbol=snapshot.symbol,
@@ -150,65 +158,60 @@ class LocalOrderBook:
         return sorted(self._asks.items())
 
     @staticmethod
-    def _top_levels(
-        book: dict[Decimal, Decimal], max_levels: int, *, reverse: bool
-    ) -> list[tuple[Decimal, Decimal]]:
-        if max_levels <= 0:
-            if max_levels == 0:
-                max_levels = len(book)
-            else:
-                levels = sorted(book.items(), reverse=reverse)
-                return levels[:max_levels]
-        if reverse:
-            return heapq.nlargest(max_levels, book.items(), key=lambda level: level[0])
-        return heapq.nsmallest(max_levels, book.items(), key=lambda level: level[0])
-
-    def _apply_side_levels(
-        self,
-        book: dict[Decimal, Decimal],
-        heap: list[Decimal],
+    def _levels(
         levels: Iterable[tuple[Decimal, Decimal]],
-        *,
-        asks: bool,
-    ) -> None:
-        for price, quantity in levels:
-            if price <= 0 or quantity < 0:
-                raise ValueError("order-book prices must be positive and quantities non-negative")
-            if quantity == 0:
-                book.pop(price, None)
-            else:
-                if price not in book:
-                    heapq.heappush(heap, -price if asks else price)
-                book[price] = quantity
-        self._trim_side(book, heap, asks=asks)
-
-    def _trim_side(self, book: dict[Decimal, Decimal], heap: list[Decimal], *, asks: bool) -> None:
-        while len(book) > self._MAX_RETAINED_LEVELS:
-            priority = heapq.heappop(heap)
-            price = -priority if asks else priority
-            if price in book:
-                del book[price]
-        if len(heap) > 2 * max(len(book), 1):
-            heap[:] = [-price if asks else price for price in book]
-            heapq.heapify(heap)
-
-    @staticmethod
-    def _levels(levels: Iterable[tuple[Decimal, Decimal]]) -> dict[Decimal, Decimal]:
+    ) -> tuple[dict[Decimal, Decimal], dict[Decimal, float]]:
         book: dict[Decimal, Decimal] = {}
-        LocalOrderBook._apply_levels(book, levels)
-        return book
+        order: dict[Decimal, float] = {}
+        LocalOrderBook._apply_levels(book, order, levels)
+        return book, order
 
     @staticmethod
     def _apply_levels(
-        book: dict[Decimal, Decimal], levels: Iterable[tuple[Decimal, Decimal]]
+        book: dict[Decimal, Decimal],
+        order: dict[Decimal, float],
+        levels: Iterable[tuple[Decimal, Decimal]],
     ) -> None:
         for price, quantity in levels:
             if price <= 0 or quantity < 0:
                 raise ValueError("order-book prices must be positive and quantities non-negative")
             if quantity == 0:
                 book.pop(price, None)
+                order.pop(price, None)
             else:
                 book[price] = quantity
+                order[price] = float(price)
+
+    def _trim_books(self) -> None:
+        self._trim_book(self._bids, self._bid_order, reverse=True)
+        self._trim_book(self._asks, self._ask_order, reverse=False)
+
+    @staticmethod
+    def _trim_book(
+        book: dict[Decimal, Decimal], order: dict[Decimal, float], *, reverse: bool
+    ) -> None:
+        if len(book) <= _TRIM_TRIGGER_LEVELS_PER_SIDE:
+            return
+        retained = LocalOrderBook._top_levels(
+            book, order, _RETAINED_LEVELS_PER_SIDE, reverse=reverse
+        )
+        book.clear()
+        book.update(retained)
+        order.clear()
+        order.update((price, float(price)) for price, _ in retained)
+
+    @staticmethod
+    def _top_levels(
+        book: dict[Decimal, Decimal],
+        order: dict[Decimal, float],
+        max_levels: int,
+        *,
+        reverse: bool,
+    ) -> list[tuple[Decimal, Decimal]]:
+        select: Callable[..., list[Decimal]] = heapq.nlargest if reverse else heapq.nsmallest
+        prices = select(max_levels, book, key=order.__getitem__)
+        prices.sort(key=order.__getitem__, reverse=reverse)
+        return [(price, book[price]) for price in prices]
 
     def _require_sync(self) -> int:
         if not self._synchronized or self._sequence is None:
