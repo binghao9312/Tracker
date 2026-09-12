@@ -60,10 +60,9 @@ class ReferenceFlow:
         out: dict[int, tuple[float, float]] = {}
         for w in seconds:
             cutoff = now_ms - w * 1000
-            buy = sum(t.quote_value for t in self._trades if t.timestamp >= cutoff and t.side == "BUY")
-            sell = sum(
-                t.quote_value for t in self._trades if t.timestamp >= cutoff and t.side == "SELL"
-            )
+            live = [t for t in self._trades if t.timestamp >= cutoff]
+            buy = sum(t.quote_value for t in live if t.side == "BUY")
+            sell = sum(t.quote_value for t in live if t.side == "SELL")
             out[w] = (buy, sell)
         return out
 
@@ -91,15 +90,21 @@ class WindowContractTests(unittest.TestCase):
                 want = ref.windows(now, WINDOWS_SECONDS)
                 for w in WINDOWS_SECONDS:
                     self.assertAlmostEqual(
-                        got[w].buy_volume, want[w][0], places=6,
+                        got[w].buy_volume,
+                        want[w][0],
+                        places=6,
                         msg=f"buy_volume mismatch at step={step} window={w}s",
                     )
                     self.assertAlmostEqual(
-                        got[w].sell_volume, want[w][1], places=6,
+                        got[w].sell_volume,
+                        want[w][1],
+                        places=6,
                         msg=f"sell_volume mismatch at step={step} window={w}s",
                     )
                     self.assertAlmostEqual(
-                        got[w].cvd, want[w][0] - want[w][1], places=6,
+                        got[w].cvd,
+                        want[w][0] - want[w][1],
+                        places=6,
                         msg=f"cvd mismatch at step={step} window={w}s",
                     )
 
