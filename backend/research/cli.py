@@ -12,6 +12,7 @@ Commands:
 
     feed-health   per-feed write density; the Phase 0 diagnostic
     fidelity      does the offline rebuild still match what the runtime recorded?
+    coverage      which accumulated days are usable, and do they span regimes
     evaluate      response curve and rank IC for one feature
     backtest      triple-barrier backtest of the live entry rule, against a control
 
@@ -319,6 +320,37 @@ async def command_backtest(args) -> int:
     return 0
 
 
+async def command_coverage(args) -> int:
+    """Report which days of accumulated data are usable, and whether they span regimes.
+
+    Phase C1 is satisfied by neither duration nor variety alone, so this refuses on
+    both. Run it against the whole accumulation, not a recent slice -- the question is
+    what the eventual analysis will be allowed to use.
+    """
+    from research.coverage import coverage_report, summarize
+
+    session_factory, engine = _session_factory(args.database_url)
+    try:
+        start, end = await _resolve_window(session_factory, args)
+        report = await coverage_report(
+            session_factory,
+            start=start,
+            end=end,
+            min_symbols=args.min_symbols,
+            max_gap_seconds=args.max_gap,
+        )
+    finally:
+        await engine.dispose()
+
+    print(summarize(report.days))
+    passed, reason = report.verdict(
+        min_days=args.min_days, min_regime_spread=args.min_regime_spread
+    )
+    print()
+    print(f"Phase C1 gate: {'PASS' if passed else 'NOT YET'} -- {reason}")
+    return 0 if passed else 1
+
+
 def command_feed_health(args) -> int:
     from research.feed_health import main as feed_health_main
 
@@ -379,6 +411,22 @@ def build_parser() -> argparse.ArgumentParser:
     backtest.add_argument("--max-open", type=int, default=3)
     backtest.add_argument("--seed", type=int, default=0)
     backtest.set_defaults(run=command_backtest, is_async=True)
+
+    coverage = subparsers.add_parser(
+        "coverage", help="which accumulated days are usable, and do they span regimes"
+    )
+    add_window(coverage)
+    coverage.set_defaults(hours=24.0 * 45)
+    coverage.add_argument("--min-days", type=int, default=21, help="Phase C1 duration gate")
+    coverage.add_argument(
+        "--min-regime-spread",
+        type=float,
+        default=2.0,
+        help="busiest usable day must be this many times the calmest",
+    )
+    coverage.add_argument("--min-symbols", type=int, default=40)
+    coverage.add_argument("--max-gap", type=float, default=120.0, help="seconds")
+    coverage.set_defaults(run=command_coverage, is_async=True)
 
     feed_health = subparsers.add_parser("feed-health", help="per-feed write density")
     feed_health.add_argument("rest", nargs=argparse.REMAINDER)
