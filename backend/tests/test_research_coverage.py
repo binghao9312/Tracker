@@ -28,7 +28,6 @@ from __future__ import annotations
 import unittest
 
 from research.coverage import DayCoverage, coverage_report, summarize
-
 from tests.research_helpers import (
     at,
     insert,
@@ -132,8 +131,11 @@ class RegimeTests(unittest.IsolatedAsyncioTestCase):
         insert(factory, "market_metrics", rows)
         report = await coverage_report(factory, start=at(0), end=at(2 * DAY))
         ranges = sorted(day.range_pct for day in report.days)
-        self.assertAlmostEqual(ranges[0], 0.4988, places=2)
-        self.assertAlmostEqual(ranges[1], 1.9802, places=2)
+        # The sweep runs low + (high-low)*n/120 for n in 0..119, so it approaches `high`
+        # without reaching it: max 100.49583 / 101.98333 against means of 100.24792 /
+        # 100.99167. Ranges are therefore 0.49461% and 1.96386%, not 0.5% and 2%.
+        self.assertAlmostEqual(ranges[0], 0.49461, places=4)
+        self.assertAlmostEqual(ranges[1], 1.96386, places=4)
         # Roughly fourfold: enough to call these different environments.
         self.assertGreater(report.regime_spread, 3.5)
 

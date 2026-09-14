@@ -424,7 +424,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=2.0,
         help="busiest usable day must be this many times the calmest",
     )
-    coverage.add_argument("--min-symbols", type=int, default=40)
+    coverage.add_argument(
+        "--min-symbols",
+        type=int,
+        default=36,
+        help="the reference feed carries 40, so this leaves room for ordinary churn",
+    )
     coverage.add_argument("--max-gap", type=float, default=120.0, help="seconds")
     coverage.set_defaults(run=command_coverage, is_async=True)
 
