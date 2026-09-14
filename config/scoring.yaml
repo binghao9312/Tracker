@@ -31,4 +31,8 @@ activity:
   funding_saturation: 0.0005
 
 data_retention:
-  metric_history_days: 30
+  # Phase C1 needs 3-4 weeks of usable data in the database at once. At 30 days a
+  # 28-day analysis window had two days of margin, and the pruner runs hourly, so a
+  # late run would silently lose the start of its own window. 45 days costs about
+  # 58 GB more (growth is ~4.3 GB/day, disk has 924 GB free) and buys 17 days of slack.
+  metric_history_days: 45
