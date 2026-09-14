@@ -38,13 +38,13 @@ from __future__ import annotations
 import unittest
 
 import numpy as np
+
 from research.evaluate import (
     BacktestConfig,
     barrier_backtest,
     rank_ic,
     response_curve,
 )
-
 from research.forward import BlockStat
 from research.panel import Panel
 

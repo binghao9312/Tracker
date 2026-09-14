@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass
+from math import isfinite
 
 import numpy as np
 
@@ -47,12 +48,22 @@ MIN_RELIABLE_BLOCKS = 30
 
 @dataclass(frozen=True)
 class BlockStat:
-    """A mean with the sample size that actually backs it."""
+    """A mean with the sample size that actually backs it.
+
+    Two means, deliberately. ``mean`` averages every observation; ``block_mean``
+    averages the block means, which is the quantity ``t_stat`` actually tests. They
+    differ whenever blocks hold unequal numbers of observations, and they can even
+    disagree in sign -- four observations of +10 in one block and one of -25 in
+    another pool to +3.0 while the blocks average -7.5. Reporting the pooled mean
+    beside a t-statistic computed from the other one reads as a contradiction, so
+    :meth:`describe` quotes the one the test is about and says when they diverge.
+    """
 
     mean: float
     t_stat: float | None
     n_observations: int
     n_blocks: int
+    block_mean: float = float("nan")
 
     @property
     def reliable(self) -> bool:
@@ -63,7 +74,12 @@ class BlockStat:
         if self.t_stat is None:
             return f"{self.mean:+.1f} {unit} (t n/a, k={self.n_blocks})"
         flag = "" if self.reliable else f"  [k<{MIN_RELIABLE_BLOCKS}: unreliable]"
-        return f"{self.mean:+.1f} {unit} (t={self.t_stat:+.2f}, k={self.n_blocks}){flag}"
+        # Quote the block mean, because that is what the t-statistic is a test of.
+        shown = self.block_mean if isfinite(self.block_mean) else self.mean
+        skew = ""
+        if isfinite(self.block_mean) and (self.block_mean > 0) != (self.mean > 0):
+            skew = f"  [pooled {self.mean:+.1f}: unequal blocks]"
+        return f"{shown:+.1f} {unit} (t={self.t_stat:+.2f}, k={self.n_blocks}){flag}{skew}"
 
 
 def forward_returns(prices: np.ndarray, horizon_steps: int) -> np.ndarray:
@@ -154,15 +170,28 @@ def block_stats(
 
     n_blocks = int(block_means.size)
     mean = float(values.mean())
+    block_mean = float(block_means.mean())
     if n_blocks < max(min_blocks, 2):
-        return BlockStat(mean=mean, t_stat=None, n_observations=int(values.size), n_blocks=n_blocks)
+        return BlockStat(
+            mean=mean,
+            t_stat=None,
+            n_observations=int(values.size),
+            n_blocks=n_blocks,
+            block_mean=block_mean,
+        )
 
     std = float(block_means.std(ddof=1))
     if std == 0.0:
         t_stat = None
     else:
-        t_stat = float(block_means.mean() / (std / np.sqrt(n_blocks)))
-    return BlockStat(mean=mean, t_stat=t_stat, n_observations=int(values.size), n_blocks=n_blocks)
+        t_stat = float(block_mean / (std / np.sqrt(n_blocks)))
+    return BlockStat(
+        mean=mean,
+        t_stat=t_stat,
+        n_observations=int(values.size),
+        n_blocks=n_blocks,
+        block_mean=block_mean,
+    )
 
 
 def naive_t_stat(values: np.ndarray) -> float:
