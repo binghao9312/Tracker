@@ -53,22 +53,26 @@ Read these before writing anything:
 
 ## Required interface
 
+`Panel` is constructed directly by other tests, so its field list is part of the
+contract, not an implementation detail. Use exactly these fields, in this order, all
+passable by keyword:
+
 ```python
 BIAS_CODES: Mapping[str, float]   # {"LONG": 1.0, "SHORT": -1.0, "NONE": 0.0}
 
 @dataclass(frozen=True)
 class Panel:
-    grid: np.ndarray                    # (T,) int64 epoch seconds, evenly spaced
-    symbols: tuple[str, ...]            # (S,) sorted
-    features: Mapping[str, np.ndarray]  # each (T, S) float32
+    grid: np.ndarray                        # (T,) int64 epoch seconds, evenly spaced
+    symbols: tuple[str, ...]                # (S,) sorted
+    features: Mapping[str, np.ndarray]      # each (T, S) float32
+    categoricals: Mapping[str, np.ndarray]  # each (T, S) object array of str | None
+    tradable: np.ndarray                    # (T, S) bool
     step_seconds: int
 
     def feature(self, name: str) -> np.ndarray:      # KeyError if unknown
-    def categorical(self, name: str) -> np.ndarray:  # (T, S) object array of str|None
+    def categorical(self, name: str) -> np.ndarray:  # KeyError if unknown
     @property
-    def tradable(self) -> np.ndarray:                # (T, S) bool
-    @property
-    def shape(self) -> tuple[int, int]:
+    def shape(self) -> tuple[int, int]:              # (T, S)
 
 async def build_panel(
     session_factory,
