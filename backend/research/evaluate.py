@@ -342,24 +342,34 @@ def barrier_backtest(panel: object, config: BacktestConfig | None = None) -> Bac
     steps, symbol_count = prices.shape
     rng = np.random.default_rng(config.control_seed)
 
+    # Control candidates are found on demand, per (symbol, side) that actually trades.
+    # Enumerating them all up front costs one simulated path per tradable row per side
+    # -- around 795,000 of them on a 24h panel -- and the live entry threshold has never
+    # fired, so the usual case paid all of that to produce nothing. Laziness does not
+    # perturb the draws: the generator is still consumed exactly once per signal trade,
+    # in trade order, so a given seed yields the same controls as before.
     control_rows: dict[tuple[int, str], np.ndarray] = {}
-    for symbol_index in range(symbol_count):
-        for side in ("LONG", "SHORT"):
-            candidates = []
-            for index in np.flatnonzero(tradable[:, symbol_index]):
-                if (
-                    _trade_from_path(
-                        symbol=panel.symbols[symbol_index],
-                        side=side,
-                        entry_index=int(index),
-                        prices=prices[:, symbol_index],
-                        horizon_steps=horizon_steps,
-                        config=config,
-                    )
-                    is not None
-                ):
-                    candidates.append(int(index))
-            control_rows[(symbol_index, side)] = np.asarray(candidates, dtype=int)
+
+    def control_candidates(symbol_index: int, side: str) -> np.ndarray:
+        cached = control_rows.get((symbol_index, side))
+        if cached is not None:
+            return cached
+        candidates = [
+            int(index)
+            for index in np.flatnonzero(tradable[:, symbol_index])
+            if _trade_from_path(
+                symbol=panel.symbols[symbol_index],
+                side=side,
+                entry_index=int(index),
+                prices=prices[:, symbol_index],
+                horizon_steps=horizon_steps,
+                config=config,
+            )
+            is not None
+        ]
+        found = np.asarray(candidates, dtype=int)
+        control_rows[(symbol_index, side)] = found
+        return found
 
     trades: list[Trade] = []
     controls: list[Trade] = []
@@ -399,7 +409,7 @@ def barrier_backtest(panel: object, config: BacktestConfig | None = None) -> Bac
             trades.append(trade)
             open_positions[symbol] = trade
 
-            candidates = control_rows[(symbol_index, side)]
+            candidates = control_candidates(symbol_index, side)
             if candidates.size:
                 control_entry = int(rng.choice(candidates))
                 control_trade = _trade_from_path(
