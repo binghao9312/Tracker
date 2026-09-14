@@ -34,10 +34,10 @@ pins that it is taken rather than quietly recomputed from the columns that do ex
 from __future__ import annotations
 
 import math
+import tracemalloc
 import unittest
 
 import numpy as np
-from research.panel import BIAS_CODES, build_panel
 
 from app.flow import pressure
 from app.scoring import (
@@ -49,6 +49,7 @@ from app.scoring import (
     cross_exchange_state,
 )
 from app.trade_signal import TradeBias, calculate_trade_signal
+from research.panel import BIAS_CODES, build_panel
 from tests.research_helpers import (
     at,
     derivative_row,
@@ -556,6 +557,66 @@ class BiasEncodingTests(unittest.TestCase):
         self.assertEqual(BIAS_CODES[TradeBias.LONG.value], 1.0)
         self.assertEqual(BIAS_CODES[TradeBias.SHORT.value], -1.0)
         self.assertEqual(BIAS_CODES[TradeBias.NONE.value], 0.0)
+
+
+class PanelScalingTests(unittest.IsolatedAsyncioTestCase):
+    """Memory must track the grid, not the number of rows behind it.
+
+    Measured on 2026-09-14 against the first implementation: 566 MB of peak traced
+    allocation for 338,400 rows, which extrapolates to about 7.9 GB for one real day
+    (46 symbols at a ~1.7s cadence produce roughly 4.7M rows across the four tables).
+    That is not a slow path, it is an unusable one, and nothing about it shows up in a
+    test built on a few hundred synthetic rows.
+
+    The fix is to stop materialising the window. Both the rows and the grid are ordered
+    by time, so one forward pass can keep only the latest row per (symbol, venue) and
+    drop the rest. Then memory depends on the panel being built rather than on how long
+    the collector happened to be running.
+
+    This test holds the grid fixed and makes the rows behind it eight times denser. A
+    panel that buffers the window pays eight times the memory; one that streams pays
+    almost nothing extra.
+    """
+
+    @staticmethod
+    async def _peak_bytes(factory, *, end_seconds: float) -> int:
+        tracemalloc.start()
+        try:
+            await build_panel(
+                factory,
+                start=at(0),
+                end=at(end_seconds),
+                step_seconds=10,
+                fresh_tolerance_seconds=30,
+            )
+            return tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+
+    async def test_memory_does_not_track_row_density(self) -> None:
+        window = 600.0
+        symbols = ("AAAUSDT", "BBBUSDT", "CCCUSDT", "DDDUSDT")
+
+        sparse = memory_session_factory()
+        _seed(sparse, symbols=symbols, steps=int(window / 10), step_seconds=10)
+        dense = memory_session_factory()
+        _seed(dense, symbols=symbols, steps=int(window / 1.25), step_seconds=1.25)
+
+        await self._peak_bytes(sparse, end_seconds=window)  # warm up allocators
+        sparse_peak = await self._peak_bytes(sparse, end_seconds=window)
+        dense_peak = await self._peak_bytes(dense, end_seconds=window)
+
+        ratio = dense_peak / sparse_peak
+        self.assertLess(
+            ratio,
+            3.0,
+            msg=(
+                f"eight times the rows behind the same grid cost {ratio:.1f}x the peak "
+                f"memory ({sparse_peak / 1e6:.1f} MB -> {dense_peak / 1e6:.1f} MB). "
+                "The panel is buffering the window instead of streaming it, which does "
+                "not fit in memory for a real day of data."
+            ),
+        )
 
 
 if __name__ == "__main__":
