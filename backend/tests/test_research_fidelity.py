@@ -321,12 +321,12 @@ class PanelFidelityTests(unittest.IsolatedAsyncioTestCase):
     async def test_every_cell_matches_the_reference_rebuild(self) -> None:
         factory = memory_session_factory()
         symbols = ("AAAUSDT", "BBBUSDT", "CCCUSDT")
-        rows = _seed(factory, symbols=symbols, steps=12)
+        rows = _seed(factory, symbols=symbols, steps=40)
 
         panel = await build_panel(
             factory,
             start=at(0),
-            end=at(120),
+            end=at(390),
             step_seconds=10,
             fresh_tolerance_seconds=BOOK_TOLERANCE,
         )
