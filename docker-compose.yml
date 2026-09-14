@@ -12,6 +12,11 @@ services:
       timeout: 3s
       retries: 10
     volumes: ["postgres-data:/var/lib/postgresql/data"]
+    # Published on loopback only, so `python -m research` can reach the metrics from
+    # the host. The backend still connects over the compose network on 5432; this is a
+    # second door for read-only analysis, not the application's path. Binding to
+    # 127.0.0.1 rather than 0.0.0.0 keeps it off the local network.
+    ports: ["127.0.0.1:5433:5432"]
   backend:
     build:
       context: .

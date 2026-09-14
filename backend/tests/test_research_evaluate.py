@@ -44,9 +44,9 @@ from research.evaluate import (
     rank_ic,
     response_curve,
 )
-from research.panel import Panel
 
 from research.forward import BlockStat
+from research.panel import Panel
 
 STEP = 10
 
