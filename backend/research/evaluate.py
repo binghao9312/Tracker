@@ -129,18 +129,88 @@ def _spearman(feature: np.ndarray, returns: np.ndarray) -> float:
     return float(np.dot(feature_ranks, return_ranks) / denominator)
 
 
+def trailing_volatility(panel: object, window_seconds: int) -> np.ndarray:
+    """Return log-return volatility over the strictly trailing window."""
+    window_steps = _horizon_steps(panel, window_seconds)
+    prices = np.asarray(panel.feature("price"), dtype=float)
+    if prices.shape != tuple(panel.shape):
+        raise ValueError("price feature shape must match panel")
+
+    result = np.full(prices.shape, np.nan, dtype=float)
+    if window_steps >= len(prices):
+        return result
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        log_returns = np.diff(np.log(prices), axis=0)
+    windows = np.lib.stride_tricks.sliding_window_view(log_returns, window_steps, axis=0)
+    result[window_steps:] = np.std(windows, axis=-1)
+    return result
+
+
+def _partial_residuals(
+    feature: np.ndarray, returns: np.ndarray, control: np.ndarray
+) -> tuple[np.ndarray, np.ndarray] | None:
+    if feature.size < 3:
+        return None
+
+    feature_ranks = _rankdata(feature)
+    return_ranks = _rankdata(returns)
+    control_ranks = _rankdata(control)
+    feature_ranks -= feature_ranks.mean()
+    return_ranks -= return_ranks.mean()
+    control_ranks -= control_ranks.mean()
+
+    control_sum_squares = float(np.dot(control_ranks, control_ranks))
+    if control_sum_squares:
+        feature_ranks -= (
+            np.dot(feature_ranks, control_ranks) / control_sum_squares
+        ) * control_ranks
+        return_ranks -= (np.dot(return_ranks, control_ranks) / control_sum_squares) * control_ranks
+    return feature_ranks, return_ranks
+
+
+def _partial_spearman(feature: np.ndarray, returns: np.ndarray, control: np.ndarray) -> float:
+    residuals = _partial_residuals(feature, returns, control)
+    if residuals is None:
+        return float("nan")
+    feature_residual, return_residual = residuals
+    denominator = float(
+        np.sqrt(
+            np.dot(feature_residual, feature_residual) * np.dot(return_residual, return_residual)
+        )
+    )
+    if denominator == 0.0:
+        return 0.0
+    return float(np.dot(feature_residual, return_residual) / denominator)
+
+
+def _feature_values(panel: object, value: str | np.ndarray) -> tuple[str, np.ndarray]:
+    if isinstance(value, str):
+        name = value
+        values = panel.feature(value)
+    else:
+        name = "<array>"
+        values = value
+    values = np.asarray(values, dtype=float)
+    if values.shape != tuple(panel.shape):
+        raise ValueError("feature shape must match panel")
+    return name, values
+
+
 def rank_ic(
     panel: object,
-    feature: str,
+    feature: str | np.ndarray,
     horizon_seconds: int,
     *,
     within_symbol: bool = True,
     absolute: bool = True,
     tradable_only: bool = True,
+    control: str | np.ndarray | None = None,
 ) -> ICResult:
     """Measure Spearman correlation between a feature and forward returns."""
     horizon_steps = _horizon_steps(panel, horizon_seconds)
-    feature_values = np.asarray(panel.feature(feature), dtype=float)
+    feature_name, feature_values = _feature_values(panel, feature)
+    control_values = None if control is None else _feature_values(panel, control)[1]
     prices = np.asarray(panel.feature("price"), dtype=float)
     returns = forward_returns(prices, horizon_steps)
     if absolute:
@@ -149,6 +219,8 @@ def rank_ic(
     tradable = np.asarray(panel.tradable, dtype=bool)
     entry_mask = tradable if tradable_only else np.ones_like(tradable, dtype=bool)
     valid = np.isfinite(feature_values) & np.isfinite(returns) & entry_mask
+    if control_values is not None:
+        valid &= np.isfinite(control_values)
 
     per_symbol: dict[str, float] = {}
     observation_counts: dict[str, int] = {}
@@ -157,7 +229,14 @@ def rank_ic(
         count = int(mask.sum())
         if count < 3:
             continue
-        correlation = _spearman(feature_values[mask, symbol_index], returns[mask, symbol_index])
+        if control_values is None:
+            correlation = _spearman(feature_values[mask, symbol_index], returns[mask, symbol_index])
+        else:
+            correlation = _partial_spearman(
+                feature_values[mask, symbol_index],
+                returns[mask, symbol_index],
+                control_values[mask, symbol_index],
+            )
         if np.isfinite(correlation):
             per_symbol[symbol] = correlation
             observation_counts[symbol] = count
@@ -167,7 +246,7 @@ def rank_ic(
         mean_ic = float(correlations.mean()) if correlations.size else float("nan")
         n_observations = sum(observation_counts.values())
         n_symbols = len(per_symbol)
-    else:
+    elif control_values is None:
         qualified = np.zeros_like(valid, dtype=bool)
         for symbol_index, symbol in enumerate(panel.symbols):
             if symbol in observation_counts:
@@ -179,10 +258,46 @@ def rank_ic(
         )
         n_observations = int(qualified.sum())
         n_symbols = len(per_symbol)
+    else:
+        residual_features: list[np.ndarray] = []
+        residual_returns: list[np.ndarray] = []
+        for symbol_index, symbol in enumerate(panel.symbols):
+            if symbol not in observation_counts:
+                continue
+            mask = valid[:, symbol_index]
+            residuals = _partial_residuals(
+                feature_values[mask, symbol_index],
+                returns[mask, symbol_index],
+                control_values[mask, symbol_index],
+            )
+            if residuals is not None:
+                feature_residual, return_residual = residuals
+                residual_features.append(feature_residual)
+                residual_returns.append(return_residual)
+        pooled_feature = np.concatenate(residual_features) if residual_features else np.empty(0)
+        pooled_returns = np.concatenate(residual_returns) if residual_returns else np.empty(0)
+        if pooled_feature.size >= 3:
+            feature_centered = pooled_feature - pooled_feature.mean()
+            returns_centered = pooled_returns - pooled_returns.mean()
+            denominator = float(
+                np.sqrt(
+                    np.dot(feature_centered, feature_centered)
+                    * np.dot(returns_centered, returns_centered)
+                )
+            )
+            mean_ic = (
+                float(np.dot(feature_centered, returns_centered) / denominator)
+                if denominator
+                else 0.0
+            )
+        else:
+            mean_ic = float("nan")
+        n_observations = sum(observation_counts.values())
+        n_symbols = len(per_symbol)
 
     positive_symbols = sum(value > 0.0 for value in per_symbol.values())
     return ICResult(
-        feature=feature,
+        feature=feature_name,
         horizon_seconds=horizon_seconds,
         mean_ic=mean_ic,
         n_symbols=n_symbols,
